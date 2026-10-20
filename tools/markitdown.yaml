@@ -1,0 +1,89 @@
+identity:
+  name: markitdown
+  author: lolit
+  label:
+    en_US: Convert to Markdown
+    zh_Hans: 转换为 Markdown
+  description:
+    en_US: Convert PDF, Word, Excel, PPT and HTML into clean Markdown for Dify Knowledge Pipeline.
+    zh_Hans: 将 PDF、Word、Excel、PPT 和 HTML 转换为干净 Markdown，供 Dify 知识管道使用。
+  icon: icon.svg
+description:
+  human:
+    en_US: Convert PDF, Word, PowerPoint, Excel, HTML and images into clean Markdown text. Preserves heading hierarchy and tables. Built for Dify Knowledge Pipeline document processing.
+    zh_Hans: 将 PDF、Word、PPT、Excel、HTML 和图片转换为干净的 Markdown 文本，保留标题层级与表格结构，专为 Dify 知识管道文档处理设计。
+  llm: Convert documents to Markdown. Use this in a Knowledge Pipeline to parse PDF/Word/Excel/PPT/HTML files before chunking.
+parameters:
+  - name: files
+    type: files
+    required: true
+    label:
+      en_US: Files
+      zh_Hans: 文件
+    human_description:
+      en_US: Documents to convert (PDF, DOCX, PPTX, XLSX, HTML, images)
+      zh_Hans: 待转换的文档（PDF、DOCX、PPTX、XLSX、HTML、图片）
+    form: form
+  - name: clean_noise
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Clean conversion noise
+      zh_Hans: 清除转换噪声
+    human_description:
+      en_US: Remove base64 image placeholders, empty table rows, and table-of-contents leftovers. Strongly recommended for knowledge base indexing.
+      zh_Hans: 清除 base64 图片占位符、空表格行、目录残留。用于知识库索引时强烈建议开启。
+    form: form
+  - name: restore_headings
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Restore heading levels
+      zh_Hans: 补齐标题层级
+    human_description:
+      en_US: Detect chapter headings (一、/ （一）/ 1、) that Word stored as bold paragraphs instead of heading styles, and add # / ## / ### marks. Without this, parent-child chunking delimiters fail. Keep ON.
+      zh_Hans: 识别 Word 中未套用标题样式、仅以加粗呈现的章节标题（一、/ （一）/ 1、），补上 # / ## / ### 标记。不开启则父子分段分隔符失效，建议保持开启。
+    form: form
+  - name: clean_pdf_headers
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Clean PDF headers/footers
+      zh_Hans: 清除 PDF 页眉页脚
+    human_description:
+      en_US: Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Only affects PDF files. Keep ON for PDF sources.
+      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉（公司名）、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
+    form: form
+  - name: add_frontmatter
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Add metadata frontmatter
+      zh_Hans: 添加元数据前置信息
+    human_description:
+      en_US: Prepend a YAML frontmatter block with the source filename. Useful for traceability.
+      zh_Hans: 在开头插入包含源文件名的 YAML frontmatter，便于溯源。
+    form: form
+  - name: keep_images
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Keep embedded images
+      zh_Hans: 保留内嵌图片
+    human_description:
+      en_US: Keep base64 image data in output. Leave OFF for knowledge bases — large base64 blobs destroy embedding quality.
+      zh_Hans: 保留 base64 图片数据。知识库场景请保持关闭，巨大的 base64 会破坏向量化质量。
+    form: form
+extra:
+  python:
+    source: tools/markitdown.py
+output_schema:
+  type: string
+  human_description:
+    en_US: Converted Markdown text
+    zh_Hans: 转换后的 Markdown 文本

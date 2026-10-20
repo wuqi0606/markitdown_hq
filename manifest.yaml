@@ -1,0 +1,36 @@
+version: 0.0.1
+type: plugin
+author: lolit
+name: markitdown_hq
+label:
+  en_US: MarkItDown HQ
+  zh_Hans: MarkItDown 文档转换（最新版）
+description:
+  en_US: Convert PDF, Word, PowerPoint, Excel and HTML to clean Markdown using Microsoft MarkItDown. Built for Dify Knowledge Pipeline document processing.
+  zh_Hans: 基于微软 MarkItDown 将 PDF、Word、PPT、Excel、HTML 转换为干净 Markdown，专为 Dify 知识管道文档处理设计。
+icon: icon.svg
+icon_dark: icon_dark.svg
+created_at: "2026-10-19T07:30:00Z"
+resource:
+  memory: 536870912
+  permission:
+    tool:
+      enabled: true
+plugins:
+  tools:
+    - provider/markitdown_hq.yaml
+meta:
+  version: 0.0.1
+  arch:
+    - amd64
+    - arm64
+  runner:
+    language: python
+    version: "3.12"
+    entrypoint: main
+tags:
+  - conversion
+  - document
+  - markdown
+  - knowledge
+privacy: PRIVACY.md

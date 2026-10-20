@@ -1,0 +1,20 @@
+identity:
+  author: lolit
+  name: markitdown_hq
+  label:
+    en_US: MarkItDown HQ
+    zh_Hans: MarkItDown 文档转换（最新版）
+  description:
+    en_US: Convert documents to clean Markdown for Dify Knowledge Pipeline.
+    zh_Hans: 将文档转换为干净 Markdown，供 Dify 知识管道使用。
+  icon: icon.svg
+  tags:
+    - productivity
+    - utilities
+tools:
+  - tools/markitdown.yaml
+extra:
+  server:
+    timeout: 120
+  python:
+    source: provider/markitdown_hq.py
