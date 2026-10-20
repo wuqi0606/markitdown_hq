@@ -4,8 +4,8 @@
 背景：PDF 没有「页眉页脚」的结构概念，MarkItDown 按文本流顺序抽取，
 结果每页重复的页眉（公司名）、页脚（页码）全部混进正文。
 
-实测 `销售开票及回款管理办法V2.3.pdf`：
-  - 页眉「中科美络科技股份有限公司」重复 6 次
+典型污染形态：
+  - 页眉「某某科技有限公司」每页重复出现
   - 目录页码 6/7/8/9/10 + 罗马页码 I 变成孤立数字行
   - 首页封面区被拆成 `| （内部使用 | 注意保密） |` 这种断裂表格
 
@@ -24,10 +24,10 @@ from collections import Counter
 RE_LONE_PAGE_NO = re.compile(r"^\s*(?:\d{1,4}|[ivxlcdmIVXLCDM]{1,7})\s*$")
 # Markdown 表格分隔行（含 --- 或 ----）
 RE_TABLE_SEP = re.compile(r"^\|[\s:\-|]+\|$")
-# 含公司名/密级等固定信息的页眉页脚特征词
-RE_HEADER_HINT = re.compile(
-    r"(中科美络|股份有限公司|内部使用|注意保密|文件密级|文件编号|文件标识|"
-    r"绝密|机密|秘密)"
+# 通用页眉页脚特征词（不含任何公司名——公司名通过调用方参数传入）
+_DEFAULT_HINTS = (
+    "股份有限公司|内部使用|注意保密|文件密级|文件编号|文件标识|"
+    "绝密|机密|秘密"
 )
 # 章节标题（不能当页眉删）
 RE_CHAPTER = re.compile(
@@ -43,7 +43,20 @@ RE_CHAPTER = re.compile(
 _PAGE_NO_HEADER_DISTANCE = 3
 
 
-def _is_candidate_header(line: str, freq: dict[str, int], threshold: int) -> bool:
+def _build_header_pattern(extra_keywords: str = "") -> re.Pattern:
+    """合并用户自定义关键词与通用特征词，构造页眉判定正则。
+
+    extra_keywords：用户输入的页眉/页脚文字（如公司名），
+    支持逗号/分号/空白分隔多个词。
+    """
+    words = [w.strip() for w in re.split(r"[,，;；|\s]+", extra_keywords or "") if w.strip()]
+    hints = "|".join(re.escape(w) for w in words + [_DEFAULT_HINTS])
+    return re.compile(rf"({hints})")
+
+
+def _is_candidate_header(
+    line: str, freq: dict[str, int], threshold: int, header_hint: re.Pattern
+) -> bool:
     """判断某行是否为重复出现的页眉/页脚。"""
     s = line.strip()
     if not s or len(s) > 60:
@@ -53,7 +66,7 @@ def _is_candidate_header(line: str, freq: dict[str, int], threshold: int) -> boo
     if RE_CHAPTER.match(s):
         return False
     # 规则一：含页眉特征词，且重复出现 >= threshold 次
-    if RE_HEADER_HINT.search(s) and freq.get(s, 0) >= threshold:
+    if header_hint.search(s) and freq.get(s, 0) >= threshold:
         return True
     # 规则二：纯数字行且是连续页码段（6/7/8/9/10 这类）
     if RE_LONE_PAGE_NO.match(s) and freq.get(s, 0) >= 2:
@@ -61,9 +74,16 @@ def _is_candidate_header(line: str, freq: dict[str, int], threshold: int) -> boo
     return False
 
 
-def clean_pdf_markdown(text: str, *, min_repeat: int = 2) -> tuple[str, dict]:
-    """清洗 PDF 转换结果，返回 (清洗后文本, 统计)。"""
+def clean_pdf_markdown(
+    text: str, *, min_repeat: int = 2, header_keywords: str = ""
+) -> tuple[str, dict]:
+    """清洗 PDF 转换结果，返回 (清洗后文本, 统计)。
+
+    header_keywords：用户自定义的页眉/页脚特征词（如公司名），
+    多个词用逗号分隔。留空则只按通用特征词（密级/编号/保密标识等）判定。
+    """
     stats = {"headers_removed": 0, "page_nums_removed": 0, "sep_rows_removed": 0}
+    header_hint = _build_header_pattern(header_keywords)
 
     lines = text.split("\n")
     # 统计每个非空短行出现次数
@@ -98,7 +118,7 @@ def clean_pdf_markdown(text: str, *, min_repeat: int = 2) -> tuple[str, dict]:
         if RE_TABLE_SEP.match(s):
             stats["sep_rows_removed"] += 1
             continue
-        if _is_candidate_header(line, freq, min_repeat):
+        if _is_candidate_header(line, freq, min_repeat, header_hint):
             stats["headers_removed"] += 1
             removed_header_idx.append(idx)
             continue

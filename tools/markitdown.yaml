@@ -57,6 +57,17 @@ parameters:
       en_US: Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Only affects PDF files. Keep ON for PDF sources.
       zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉（公司名）、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
     form: form
+  - name: pdf_header_keywords
+    type: string
+    required: false
+    default: ''
+    label:
+      en_US: PDF header keywords
+      zh_Hans: 页眉页脚特征词
+    human_description:
+      en_US: Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas. Combined with built-in hints (confidentiality marks, document numbers). Leave empty if your PDFs have no custom headers.
+      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。会与内置特征词（密级标识、文件编号、保密标识等）合并生效。PDF 无自定义页眉时留空即可。
+    form: form
   - name: add_frontmatter
     type: boolean
     required: false

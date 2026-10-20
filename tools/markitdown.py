@@ -51,7 +51,7 @@ _RE_TOC_TEXT = re.compile(r"^\s*(?:[一二三四五六七八九十]+、|（[一�
 # 目录条目（markdown 链接形态）：[一、 编制目的 3](#_Toc23278)
 _RE_TOC_LINK = re.compile(r"^\s*\[.+?\]\(#.+?\)\s*$")
 # 目录区块内降级残留：Word 目录样式被 MarkItDown 降级为「标题名 + 页码」
-#   例：「中科美络科技股份有限公司 1」「附件一、各业务线标准交付周期表 9」
+#   例：「某某科技股份有限公司 1」「附件一、各业务线标准交付周期表 9」
 # 仅在「目录」到下一个标题之间应用，避免误删正文里的数字结尾句子
 _RE_TOC_TAIL_NUM = re.compile(r"^\s*\S[^\n]{0,44}?\s+\d{1,3}\s*$")
 # 连续 3 个以上空行压缩为 2 个
@@ -73,6 +73,7 @@ class MarkitdownTool(Tool):
         keep_images = _as_bool(tool_parameters.get("keep_images", False), False)
         fix_headings = _as_bool(tool_parameters.get("restore_headings", True), True)
         clean_pdf = _as_bool(tool_parameters.get("clean_pdf_headers", True), True)
+        pdf_header_keywords = str(tool_parameters.get("pdf_header_keywords", "") or "").strip()
 
         if not files:
             yield self.create_text_message("No files provided.")
@@ -112,7 +113,9 @@ class MarkitdownTool(Tool):
             # PDF 专用清洗：页眉/页脚/页码。必须放在通用清洗之后 ——
             # 通用清洗已删掉空表格行，页码的「距页眉距离」判定依赖这些行做间隔。
             if clean_pdf and hint == "pdf":
-                text, pstats = clean_pdf_markdown(text)
+                text, pstats = clean_pdf_markdown(
+                    text, header_keywords=pdf_header_keywords
+                )
                 if sum(pstats.values()):
                     notices.append(
                         f"[info] {name}: pdf cleanup - "
