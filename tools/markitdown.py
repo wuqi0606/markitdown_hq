@@ -3,24 +3,24 @@
 
 包装微软 MarkItDown（0.1.8），并针对 RAG 场景做输出加工：
 
-- 剥离base64 图片占位符（未开启 keep_images 时），避免撑爆 embedding 上下文
-- 清理 Word 转换残留的空表格行（`| | | |`）
+- 图片处理三选一（image_mode）：remove 删除 base64 引用（默认，避免撑爆
+  embedding 上下文）；url 通过 SDK 反向调用上传到 Dify 存储并替换为可访问链接
+- 清理 Word 转换残留的空表格行（`| | | |`），并修复分隔行错位
 - 清理目录页残留
-- **补齐丢失的标题层级**（restore_headings，默认开启）
-
-关于最后一项：这批企业制度文件的章节标题在 Word 里用的是**普通加粗段落**
-而非「标题1/2/3」样式，MarkItDown 靠样式映射生成 `#`，导致转换后层级全部丢失。
-不补齐的话，父子分段的`\n#` / `\n##` 分隔符完全失效。
-实测 31 份文件：补齐前 7 份零标题、10 份只有一级；补齐后 0 份无标题。
+- **补齐丢失的标题层级**（restore_headings，默认开启）：Word 里未套用
+  标题样式、仅以加粗呈现的章节标题，MarkItDown 转换后层级全丢，
+  不补齐则父子分段的 `\n#` / `\n##` 分隔符完全失效。
+  层级按文档实际出现的编号形态动态映射。
 
 用法（作为 Dify 插件 Tool 调用）::
 
     invoke(files=[...], clean_noise=True, restore_headings=True,
-           add_frontmatter=False, keep_images=False)
+           add_frontmatter=False, image_mode='remove')
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import re
 from collections.abc import Generator
@@ -70,10 +70,12 @@ class MarkitdownTool(Tool):
         files = tool_parameters.get("files") or []
         clean_noise = _as_bool(tool_parameters.get("clean_noise", True), True)
         add_frontmatter = _as_bool(tool_parameters.get("add_frontmatter", False), False)
-        keep_images = _as_bool(tool_parameters.get("keep_images", False), False)
         fix_headings = _as_bool(tool_parameters.get("restore_headings", True), True)
         clean_pdf = _as_bool(tool_parameters.get("clean_pdf_headers", True), True)
         pdf_header_keywords = str(tool_parameters.get("pdf_header_keywords", "") or "").strip()
+        image_mode = str(tool_parameters.get("image_mode", "remove") or "remove").strip().lower()
+        if image_mode not in {"remove", "url"}:
+            image_mode = "remove"
 
         if not files:
             yield self.create_text_message("No files provided.")
@@ -108,7 +110,15 @@ class MarkitdownTool(Tool):
                 notices.append(f"[fail] {name}: {type(exc).__name__}: {exc}")
                 continue
 
-            text = _clean(raw, clean_noise=clean_noise, keep_images=keep_images)
+            # 图片处理：remove=删掉 base64 引用；url=上传 Dify 存储换签名链接。
+            # 上传必须在这里做（需要 self.session），不能放进纯文本的 _clean。
+            if image_mode == "url":
+                raw, n_up, n_fail = _upload_images(raw, self.session, name, notices)
+                if n_up:
+                    notices.append(f"[info] {name}: images uploaded {n_up}, failed {n_fail}")
+                raw = _strip_images(raw)  # 清掉上传失败残留的 data URI
+
+            text = _clean(raw, clean_noise=clean_noise)
 
             # PDF 专用清洗：页眉/页脚/页码。必须放在通用清洗之后 ——
             # 通用清洗已删掉空表格行，页码的「距页眉距离」判定依赖这些行做间隔。
@@ -202,6 +212,59 @@ def _strip_images(text: str) -> str:
     return text
 
 
+# data URI 完整形态：![alt](data:image/png;base64,AAAA)
+# base64 字符集不含 ')'，用 [^)] 安全截止；alt 可能含乱码，单独兜底删裸 URI
+_RE_MD_DATA_IMAGE = re.compile(
+    r"!\[[^\]]*\]\(\s*data:image/([^;)]+);base64,([^)\s]+)\s*\)"
+)
+
+
+def _upload_images(
+    text: str, session, source_name: str, notices: list[str]
+) -> tuple[str, int, int]:
+    """把文本里的 base64 图片上传到 Dify 存储，替换为签名 URL。
+
+    使用 SDK 的反向调用能力（session.file.upload），图片二进制
+    存入 Dify 文件存储后拿到 preview_url（签名链接，有时效）。
+    单张失败只删该图并在 notices 记录，不影响其余图片。
+    返回 (替换后文本, 成功数, 失败数)。
+    """
+    if "data:image/" not in text:
+        return text, 0, 0
+
+    from dify_plugin.invocations.file import File
+
+    file_invocation = File(session)
+    out: list[str] = []
+    ok = fail = 0
+    last = 0
+    for i, m in enumerate(_RE_MD_DATA_IMAGE.finditer(text), start=1):
+        out.append(text[last : m.start()])
+        last = m.end()
+        ext = m.group(1).lower()
+        try:
+            data = base64.b64decode(m.group(2))
+            resp = file_invocation.upload(
+                filename=f"{source_name}-image-{i}.{ext}",
+                content=data,
+                mimetype=f"image/{ext}",
+            )
+            url = (getattr(resp, "preview_url", None) or "").strip()
+            if url:
+                out.append(f"![image]({url})")
+                ok += 1
+            else:
+                out.append("")
+                fail += 1
+                notices.append(f"[warn] {source_name}: image {i} uploaded but no url")
+        except Exception as exc:  # noqa: BLE001
+            out.append("")
+            fail += 1
+            notices.append(f"[warn] {source_name}: image {i} upload failed: {exc}")
+    out.append(text[last:])
+    return "".join(out), ok, fail
+
+
 def _fix_table_sep_position(text: str) -> tuple[str, int]:
     """把顶到表格第一行的分隔行移回真表头之后。
 
@@ -235,16 +298,16 @@ def _fix_table_sep_position(text: str) -> tuple[str, int]:
     return "\n".join(out), fixed
 
 
-def _clean(raw: str, *, clean_noise: bool, keep_images: bool) -> str:
+def _clean(raw: str, *, clean_noise: bool) -> str:
     text = raw or ""
     if not clean_noise:
-        if not keep_images:
-            text = _strip_images(text)
+        # base64 图片已在 _invoke 阶段处理（删除或换 URL），这里只兜底残留
+        text = _strip_images(text)
         return text.strip() + "\n"
 
-    # 1. base64 图片占位符 —— 会撑爆 embedding 上下文
-    if not keep_images:
-        text = _strip_images(text)
+    # 1. base64 图片占位符 —— 会撑爆 embedding 上下文。
+    #    url 模式下 data URI 已在 _invoke 里替换成链接，这里删不到，无害。
+    text = _strip_images(text)
 
     # 2. 空表格行 —— 纯噪声
     #    实测 markitdown 输出顺序：空表头行 | | |  →  | --- |  →  真表头 → 数据。

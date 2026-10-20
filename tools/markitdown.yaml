@@ -46,6 +46,26 @@ parameters:
       en_US: Detect chapter headings (一、/ （一）/ 1、) that Word stored as bold paragraphs instead of heading styles, and add # / ## / ### marks. Without this, parent-child chunking delimiters fail. Keep ON.
       zh_Hans: 识别 Word 中未套用标题样式、仅以加粗呈现的章节标题（一、/ （一）/ 1、），补上 # / ## / ### 标记。不开启则父子分段分隔符失效，建议保持开启。
     form: form
+  - name: image_mode
+    type: select
+    required: false
+    default: remove
+    options:
+      - value: remove
+        label:
+          en_US: Remove images
+          zh_Hans: 删除图片
+      - value: url
+        label:
+          en_US: Upload and link
+          zh_Hans: 上传并替换为链接
+    label:
+      en_US: Image handling
+      zh_Hans: 图片处理方式
+    human_description:
+      en_US: "remove: delete images from the output. url: upload each embedded image to Dify storage and replace it with an accessible link (signed URL, may expire). Failed uploads are skipped individually."
+      zh_Hans: "删除图片：从输出中移除图片引用。上传并替换为链接：每张内嵌图片上传到 Dify 存储，替换为可访问链接（签名 URL，有时效）。单张上传失败自动跳过，不影响其余图片。"
+    form: form
   - name: clean_pdf_headers
     type: boolean
     required: false
@@ -78,17 +98,6 @@ parameters:
     human_description:
       en_US: Prepend a YAML frontmatter block with the source filename. Useful for traceability.
       zh_Hans: 在开头插入包含源文件名的 YAML frontmatter，便于溯源。
-    form: form
-  - name: keep_images
-    type: boolean
-    required: false
-    default: false
-    label:
-      en_US: Keep embedded images
-      zh_Hans: 保留内嵌图片
-    human_description:
-      en_US: Keep base64 image data in output. Leave OFF for knowledge bases — large base64 blobs destroy embedding quality.
-      zh_Hans: 保留 base64 图片数据。知识库场景请保持关闭，巨大的 base64 会破坏向量化质量。
     form: form
 extra:
   python:

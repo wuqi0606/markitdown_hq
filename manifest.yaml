@@ -1,4 +1,4 @@
-version: 0.0.3
+version: 0.0.4
 type: plugin
 author: lolit
 name: markitdown_hq
@@ -20,7 +20,7 @@ plugins:
   tools:
     - provider/markitdown_hq.yaml
 meta:
-  version: 0.0.3
+  version: 0.0.4
   arch:
     - amd64
     - arm64
