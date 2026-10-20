@@ -1,1 +1,2 @@
+dify_plugin>=0.10.0,<0.11.0
 markitdown[docx,pdf]==0.1.8
