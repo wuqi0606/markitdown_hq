@@ -74,7 +74,7 @@ class MarkitdownTool(Tool):
         clean_pdf = _as_bool(tool_parameters.get("clean_pdf_headers", True), True)
         pdf_header_keywords = str(tool_parameters.get("pdf_header_keywords", "") or "").strip()
         image_mode = str(tool_parameters.get("image_mode", "remove") or "remove").strip().lower()
-        if image_mode not in {"remove", "url"}:
+        if image_mode not in {"remove", "url", "describe"}:
             image_mode = "remove"
 
         if not files:
@@ -118,13 +118,29 @@ class MarkitdownTool(Tool):
                 notices.append(f"[fail] {name}: {type(exc).__name__}: {exc}")
                 continue
 
-            # 图片处理：remove=删掉 base64 引用；url=上传 Dify 存储换签名链接。
-            # 上传必须在这里做（需要 self.session），不能放进纯文本的 _clean。
-            if image_mode == "url":
+            # 图片处理：remove=删掉 base64 引用；url=上传换签名链接；
+            # describe=上传后再逐张调视觉模型生成描述，插在 URL 前。
+            # 上传/描述必须在这里做（需要 self.session），不能放进纯文本的 _clean。
+            if image_mode in {"url", "describe"}:
                 raw, n_up, n_fail = _upload_images(raw, self.session, name, notices)
                 if n_up:
                     notices.append(f"[info] {name}: images uploaded {n_up}, failed {n_fail}")
                 raw = _strip_images(raw)  # 清掉上传失败残留的 data URI
+
+                if image_mode == "describe":
+                    model_config = tool_parameters.get("model")
+                    if not model_config:
+                        notices.append(
+                            f"[warn] {name}: 图片处理方式为生成描述，但未选择模型，跳过描述生成"
+                        )
+                    else:
+                        raw, n_d, n_df = _describe_images(
+                            raw, self.session, model_config, name, notices
+                        )
+                        if n_d or n_df:
+                            notices.append(
+                                f"[info] {name}: image descriptions generated {n_d}, failed {n_df}"
+                            )
 
             text = _clean(raw, clean_noise=clean_noise)
 
@@ -271,6 +287,61 @@ def _upload_images(
             notices.append(f"[warn] {source_name}: image {i} upload failed: {exc}")
     out.append(text[last:])
     return "".join(out), ok, fail
+
+
+_DESCRIBE_PROMPT = (
+    "用一句中文描述这张图片：它是什么类型（流程图/审批图/界面截图/组织架构图等），"
+    "包含哪些关键节点、步骤或字段。直接输出描述本身，不要任何前后缀或引号。"
+)
+
+
+def _describe_images(
+    text: str, session, model_config: dict, source_name: str, notices: list[str]
+) -> tuple[str, int, int]:
+    """对文本里的图片链接逐张调视觉模型生成描述，插在引用之前。
+
+    使用 SDK 的 LLM 反向调用（session.model.llm.invoke），模型用平台
+    上已配置的（model_selector 参数选的），不需要插件管凭据。
+    单张失败只跳过该图并记 notice。返回 (新文本, 成功数, 失败数)。
+    """
+    url_re = re.compile(r"!\[([^\]]*)\]\((https?://[^)]+)\)")
+    targets = url_re.findall(text)
+    if not targets:
+        return text, 0, 0
+
+    from dify_plugin.entities.model.message import (
+        ImagePromptMessageContent,
+        TextPromptMessageContent,
+        UserPromptMessage,
+    )
+    from dify_plugin.invocations.model.llm import LLMInvocation
+
+    llm = LLMInvocation(session)
+    ok = fail = 0
+    for i, (_alt, url) in enumerate(targets, start=1):
+        try:
+            ext = url.rsplit(".", 1)[-1].lower() if "." in url.rsplit("/", 1)[-1] else "jpg"
+            mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "image/jpeg")
+            prompt = UserPromptMessage(
+                content=[
+                    TextPromptMessageContent(data=_DESCRIBE_PROMPT),
+                    ImagePromptMessageContent(
+                        url=url, mime_type=mime, format=ext, filename=f"image-{i}"
+                    ),
+                ]
+            )
+            resp = llm.invoke(model_config=model_config, prompt_messages=[prompt], stream=False)
+            desc = str(resp.message.content or "").strip().strip('"')
+            if desc:
+                text = text.replace(f"![{_alt}]({url})", f"> 图片说明：{desc}\n![{_alt}]({url})", 1)
+                ok += 1
+            else:
+                fail += 1
+                notices.append(f"[warn] {source_name}: image {i} empty description")
+        except Exception as exc:  # noqa: BLE001
+            fail += 1
+            notices.append(f"[warn] {source_name}: image {i} describe failed: {exc}")
+    return text, ok, fail
 
 
 def _fix_table_sep_position(text: str) -> tuple[str, int]:
