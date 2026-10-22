@@ -102,9 +102,17 @@ class MarkitdownTool(Tool):
                 continue
 
             try:
-                # convert_stream 需要 file-like 对象，不能直接传 bytes
+                # convert_stream 需要 file-like 对象，不能直接传 bytes。
+                # keep_data_uris：markitdown 的 html→md 阶段默认把 <img> 的
+                # data URI 截断成 "data:image/png;base64..." 占位符（三点是
+                # 字面量，不是真实数据）。url 模式必须开此开关才能拿到
+                # 真实图片字节，供后续上传换 URL。
                 stream = io.BytesIO(blob)
-                result = md.convert_stream(stream, file_extension=_ext_of(name, hint))
+                result = md.convert_stream(
+                    stream,
+                    file_extension=_ext_of(name, hint),
+                    keep_data_uris=(image_mode == "url"),
+                )
                 raw = result.markdown or ""
             except Exception as exc:  # noqa: BLE001
                 notices.append(f"[fail] {name}: {type(exc).__name__}: {exc}")
