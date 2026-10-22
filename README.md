@@ -1,6 +1,7 @@
 # MarkItDown HQ — Dify 插件使用说明
 
-基于微软 [MarkItDown](https://github.com/microsoft/markitdown) 0.1.8 的 Dify 文档处理插件，  
+基于微软 [MarkItDown](https://github.com/microsoft/markitdown) 0.1.8 的 Dify 文档处理插件，
+  
 将 PDF、Word、Excel、PPT、HTML 等文档转换为干净的 Markdown，供知识库分段与向量化使用。
 
 ## 解决的核心问题
@@ -95,7 +96,7 @@ langgenius/volcengine_maas/doubao-seed-2-0-pro-260215
   则无法解析，需先用 Word 另存为真正的 `.docx`。插件会在输出开头的  
   \`\` 注释里明确列出。
 - 图片被清除后，正文里「如下图所示」这类指代会失去配图。如需保留图片，  
-  开启 `保留内嵌图片`——但知识库场景下 base64 会严重损害向量化质量。
+  图片引用默认删除。如确需保留，将「图片处理方式」设为「上传并替换为链接」——注意知识库场景下过大的图片数据会损害向量化质量。
 - 目录页残留按「`一、 xxx 3`」和 `[标题](#锚点)` 两种形态清理。若你的文档  
   目录格式特殊，可能漏清，检查方式：转换后搜索输出里是否还有带页码的章节标题。
 - **PDF 页眉页脚按「重复即页眉」启发式判定**：短行重复出现 ≥2 次且含特征词才删。  
