@@ -130,10 +130,24 @@ class MarkitdownTool(Tool):
                 raw = _strip_images(raw)  # 清掉上传失败残留的 data URI
 
                 if image_mode == "describe":
-                    model_config = tool_parameters.get("model")
+                    # model 参数为字符串「提供商ID/模型名」（model-selector
+                    # 类型在知识库流水线节点面板不受支持，会导致前端崩溃）。
+                    # rpartition('/')：提供商 ID 本身含斜杠（如
+                    # langgenius/volcengine_maas），取最后一个 / 分割。
+                    raw_model = str(tool_parameters.get("model", "") or "").strip()
+                    provider, _sep, model_name = raw_model.rpartition("/")
+                    model_config = None
+                    if provider and model_name:
+                        model_config = {
+                            "provider": provider,
+                            "model": model_name,
+                            "mode": "chat",
+                            "completion_params": {},
+                        }
                     if not model_config:
                         notices.append(
-                            f"[warn] {name}: 图片处理方式为生成描述，但未选择模型，跳过描述生成"
+                            f"[warn] {name}: 图片处理方式为生成描述，但未正确填写"
+                            f"「视觉模型」（格式：提供商ID/模型名），跳过描述生成"
                         )
                     else:
                         raw, n_d, n_df = _describe_images(

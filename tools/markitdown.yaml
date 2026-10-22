@@ -71,14 +71,15 @@ parameters:
       zh_Hans: "删除图片：从输出中移除图片引用。上传并替换为链接：每张内嵌图片上传到 Dify 存储，替换为可访问链接（签名 URL，有时效）。上传并生成描述：在上传基础上，用所选视觉模型为每张图生成中文描述，插在链接前。单张失败自动跳过，不影响其余图片。"
     form: form
   - name: model
-    type: model-selector
+    type: string
     required: false
+    default: ''
     label:
-      en_US: Vision model
-      zh_Hans: 视觉模型
+      en_US: Vision model (provider/model)
+      zh_Hans: 视觉模型（提供商/模型名）
     human_description:
-      en_US: Required when image handling is set to describe. Choose a vision-capable model (icon with an eye) configured on the platform. Each image is sent to this model for description.
-      zh_Hans: 图片处理方式选「上传并生成描述」时必填。请选择平台已配置、带视觉能力的模型（图标带眼睛）。每张图片会发送给该模型生成描述。
+      en_US: "Required when image handling is 'describe'. Format: provider-id/model-name, e.g. langgenius/volcengine_maas/doubao-seed-2-0-pro-260215. The provider id and model name are visible in Dify Settings -> Model Providers (hover/copy the model entry). Must be a vision-capable model."
+      zh_Hans: "图片处理方式选「上传并生成描述」时必填。格式：提供商ID/模型名，例如 langgenius/volcengine_maas/doubao-seed-2-0-pro-260215。提供商 ID 和模型名可在 Dify「设置 → 模型供应商」里查看（把鼠标悬停在对应模型上可见完整标识）。必须是具备视觉能力的模型。"
     form: form
   - name: clean_pdf_headers
     type: boolean
