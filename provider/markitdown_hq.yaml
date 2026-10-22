@@ -3,7 +3,7 @@ identity:
   name: markitdown_hq
   label:
     en_US: MarkItDown HQ
-    zh_Hans: MarkItDown 文档转换（最新版）
+    zh_Hans: MarkItDown 文档转换
   description:
     en_US: Convert documents to clean Markdown for Dify Knowledge Pipeline.
     zh_Hans: 将文档转换为干净 Markdown，供 Dify 知识管道使用。

@@ -4,7 +4,7 @@ author: lolit
 name: markitdown_hq
 label:
   en_US: MarkItDown HQ
-  zh_Hans: MarkItDown 文档转换（最新版）
+  zh_Hans: MarkItDown 文档转换
 description:
   en_US: Convert PDF, Word, PowerPoint, Excel and HTML to clean Markdown using Microsoft MarkItDown. Built for Dify Knowledge Pipeline document processing.
   zh_Hans: 基于微软 MarkItDown 将 PDF、Word、PPT、Excel、HTML 转换为干净 Markdown，专为 Dify 知识管道文档处理设计。
