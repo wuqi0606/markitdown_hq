@@ -81,6 +81,13 @@ class MarkitdownTool(Tool):
             yield self.create_text_message("No files provided.")
             return
 
+        # 调试回显：插件实际收到的关键参数（排查平台传值问题时用）
+        notices.append(
+            f"[debug] received: image_mode={image_mode!r}, "
+            f"model={str(tool_parameters.get('model', '') or '')!r}, "
+            f"restore_headings={fix_headings}, clean_pdf={clean_pdf}"
+        )
+
         md = MarkItDown(enable_plugins=False)
         blocks: list[str] = []
         notices: list[str] = []
