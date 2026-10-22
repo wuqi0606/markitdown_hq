@@ -16,13 +16,24 @@ description:
 parameters:
   - name: files
     type: files
-    required: true
+    required: false
     label:
       en_US: Files
       zh_Hans: 文件
     human_description:
-      en_US: Documents to convert (PDF, DOCX, PPTX, XLSX, HTML, images)
-      zh_Hans: 待转换的文档（PDF、DOCX、PPTX、XLSX、HTML、图片）
+      en_US: 'Documents to convert (PDF, DOCX, PPTX, XLSX, HTML, images). Either this or upstream text is required; files take priority.'
+      zh_Hans: 待转换的文档（PDF、DOCX、PPTX、XLSX、HTML、图片）。与「上游解析文本」二选一，两者都填时以文件为准。
+    form: form
+  - name: text
+    type: string
+    required: false
+    default: ''
+    label:
+      en_US: Upstream parsed text
+      zh_Hans: 上游解析文本
+    human_description:
+      en_US: 'Markdown text parsed by an upstream parser (e.g. MinerU). The plugin skips parsing and only cleans up and processes images. Either this or Files is required.'
+      zh_Hans: 上游解析器输出的 Markdown 文本。跳过解析，仅做清洗与图片处理。与「文件」互斥。
     form: form
   - name: add_frontmatter
     type: boolean
@@ -34,6 +45,17 @@ parameters:
     human_description:
       en_US: Prepend a YAML frontmatter block with the source filename. Useful for traceability.
       zh_Hans: 在开头插入包含源文件名的 YAML frontmatter，便于溯源。
+    form: form
+  - name: output_notices
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Output debug notices
+      zh_Hans: 输出调试信息
+    human_description:
+      en_US: Prepend a conversion-notices comment (received params and per-step results). Turn OFF for knowledge base ingestion — the comment would otherwise become a noisy chunk.
+      zh_Hans: 在输出开头附上转换调试注释（收到的参数与各步骤处理结果）。知识库入库时请关闭，否则注释会成为一个噪音分段。
     form: form
   - name: clean_noise
     type: boolean
@@ -66,7 +88,7 @@ parameters:
       zh_Hans: 清除 PDF 页眉页脚
     human_description:
       en_US: Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Only affects PDF files. Keep ON for PDF sources.
-      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉（公司名）、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
+      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
     form: form
   - name: pdf_header_keywords
     type: string
@@ -76,8 +98,8 @@ parameters:
       en_US: PDF header keywords
       zh_Hans: 页眉页脚特征词
     human_description:
-      en_US: Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas. Combined with built-in hints (confidentiality marks, document numbers). Leave empty if your PDFs have no custom headers.
-      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。会与内置特征词（密级标识、文件编号、保密标识等）合并生效。PDF 无自定义页眉时留空即可。
+      en_US: 'Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas.'
+      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。
     form: form
   - name: image_mode
     type: select
@@ -101,7 +123,7 @@ parameters:
       zh_Hans: 图片处理方式
     human_description:
       en_US: "remove: delete images. url: upload each image to Dify storage and replace with an accessible link (signed URL, may expire). describe: upload plus generate a Chinese description per image via the selected vision model, inserted before the link. Failed images are skipped individually."
-      zh_Hans: "删除图片：从输出中移除图片引用。上传并替换为链接：每张内嵌图片上传到 Dify 存储，替换为可访问链接（签名 URL，有时效）。上传并生成描述：在上传基础上，用所选视觉模型为每张图生成中文描述，插在链接前。单张失败自动跳过，不影响其余图片。"
+      zh_Hans: 「删除图片」：从输出中移除图片引用。「上传并替换为链接」：每张内嵌图片上传到 Dify 存储，替换为可访问链接（签名 URL，有时效）。「上传并生成描述」：在上传基础上，用所选视觉模型为每张图生成中文描述，插在链接前。单张失败自动跳过，不影响其余图片。"
     form: form
   - name: model
     type: string
@@ -109,10 +131,10 @@ parameters:
     default: ''
     label:
       en_US: Vision model (provider/model)
-      zh_Hans: 视觉模型（提供商/模型名）
+      zh_Hans: 视觉模型
     human_description:
-      en_US: "Required when image handling is 'describe'. Format: provider-id/model-name, e.g. langgenius/volcengine_maas/doubao-seed-2-0-pro-260215. The provider id and model name are visible in Dify Settings -> Model Providers (hover/copy the model entry). Must be a vision-capable model."
-      zh_Hans: "图片处理方式选「上传并生成描述」时必填。格式：提供商ID/模型名，例如 langgenius/volcengine_maas/doubao-seed-2-0-pro-260215。提供商 ID 和模型名可在 Dify「设置 → 模型供应商」里查看（把鼠标悬停在对应模型上可见完整标识）。必须是具备视觉能力的模型。"
+      en_US: "Required when image handling is 'describe'. Format: provider-id/model-name. Must be a vision-capable model."
+      zh_Hans: 图片处理方式选「上传并生成描述」时必填。格式：提供商ID/模型名。必须是具备视觉能力的模型。
     form: form
   - name: describe_prompt
     type: string
@@ -122,8 +144,8 @@ parameters:
       en_US: Vision describe prompt
       zh_Hans: 视觉模型提示词
     human_description:
-      en_US: "Prompt sent to the vision model for each image (image handling = describe). Keep it short; the model output is used as-is."
-      zh_Hans: "图片处理方式选「上传并生成描述」时，发送给视觉模型的提示词。建议保持简短（60 字概括），模型输出会原样作为图片说明。"
+      en_US: "Required when image handling is 'describe'. The prompt sent to the vision model."
+      zh_Hans: 图片处理方式选「上传并生成描述」时必填。发送给视觉模型的提示词。
     form: form
 extra:
   python:

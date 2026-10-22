@@ -68,8 +68,12 @@ class MarkitdownTool(Tool):
 
     def _invoke(self, tool_parameters: dict[str, Any]) -> Generator[ToolInvokeMessage]:
         files = tool_parameters.get("files") or []
+        # 文本输入模式：上游（如 MinerU）已完成 PDF 解析，输出 Markdown 文本，
+        # 插件跳过解析，仅做清洗与图片处理。与 files 二选一，文件优先。
+        input_text = str(tool_parameters.get("text", "") or "").strip()
         clean_noise = _as_bool(tool_parameters.get("clean_noise", True), True)
         add_frontmatter = _as_bool(tool_parameters.get("add_frontmatter", False), False)
+        output_notices = _as_bool(tool_parameters.get("output_notices", True), True)
         fix_headings = _as_bool(tool_parameters.get("restore_headings", True), True)
         clean_pdf = _as_bool(tool_parameters.get("clean_pdf_headers", True), True)
         pdf_header_keywords = str(tool_parameters.get("pdf_header_keywords", "") or "").strip()
@@ -78,8 +82,11 @@ class MarkitdownTool(Tool):
             image_mode = "remove"
         describe_prompt = str(tool_parameters.get("describe_prompt", "") or "").strip()
 
-        if not files:
-            yield self.create_text_message("No files provided.")
+        if files and input_text:
+            # 两者都给了：以文件为准（文本模式的定位是 MinerU 分支专用）
+            input_text = ""
+        if not files and not input_text:
+            yield self.create_text_message("No files or text provided.")
             return
 
         md = MarkItDown(enable_plugins=False)
@@ -90,7 +97,8 @@ class MarkitdownTool(Tool):
         notices.append(
             f"[debug] received: image_mode={image_mode!r}, "
             f"model={str(tool_parameters.get('model', '') or '')!r}, "
-            f"restore_headings={fix_headings}, clean_pdf={clean_pdf}"
+            f"restore_headings={fix_headings}, clean_pdf={clean_pdf}, "
+            f"text_mode={bool(input_text)}"
         )
 
         for f in files:
@@ -138,34 +146,9 @@ class MarkitdownTool(Tool):
                 raw = _strip_images(raw)  # 清掉上传失败残留的 data URI
 
                 if image_mode == "describe":
-                    # model 参数为字符串「提供商ID/模型名」（model-selector
-                    # 类型在知识库流水线节点面板不受支持，会导致前端崩溃）。
-                    # rpartition('/')：提供商 ID 本身含斜杠（如
-                    # langgenius/volcengine_maas），取最后一个 / 分割。
-                    raw_model = str(tool_parameters.get("model", "") or "").strip()
-                    provider, _sep, model_name = raw_model.rpartition("/")
-                    model_config = None
-                    if provider and model_name:
-                        model_config = {
-                            "provider": provider,
-                            "model": model_name,
-                            "mode": "chat",
-                            "completion_params": {},
-                        }
-                    if not model_config:
-                        notices.append(
-                            f"[warn] {name}: 图片处理方式为生成描述，但未正确填写"
-                            f"「视觉模型」（格式：提供商ID/模型名），跳过描述生成"
-                        )
-                    else:
-                        raw, n_d, n_df = _describe_images(
-                            raw, self.session, model_config, name, notices,
-                            uploaded=uploaded, prompt_text=describe_prompt,
-                        )
-                        if n_d or n_df:
-                            notices.append(
-                                f"[info] {name}: image descriptions generated {n_d}, failed {n_df}"
-                            )
+                    raw = self._describe_with_model(
+                        raw, name, tool_parameters, describe_prompt, notices, uploaded
+                    )
 
             text = _clean(raw, clean_noise=clean_noise)
 
@@ -193,12 +176,89 @@ class MarkitdownTool(Tool):
                 text = f"---\nsource: {name}\n---\n\n{text}"
             blocks.append(text)
 
+        # ---- 文本输入模式（MinerU 分支）----
+        # 上游已完成解析，跳过 markitdown 与 PDF 专用清洗（MinerU 已按版面
+        # 结构抽取，无页眉页脚混入）。图片处理与文件模式共用同一套逻辑：
+        # MinerU 输出的图片已是 Dify 存储签名 URL，url 模式无需动作，
+        # describe 模式由插件下载 URL 转 base64 再调视觉模型。
+        if not blocks and input_text:
+            name = "text-input"
+            raw = input_text
+
+            if image_mode == "remove":
+                # 上游文本的图片是 http 链接（非 base64），删除引用
+                raw = _RE_MD_HTTP_IMAGE.sub("", raw)
+            elif image_mode in {"url", "describe"}:
+                raw, n_up, n_fail, uploaded = _upload_images(
+                    raw, self.session, name, notices
+                )
+                if n_up:
+                    notices.append(f"[info] {name}: images uploaded {n_up}, failed {n_fail}")
+                raw = _strip_images(raw)
+
+                if image_mode == "describe":
+                    raw = self._describe_with_model(
+                        raw, name, tool_parameters, describe_prompt, notices, uploaded
+                    )
+
+            text = _clean(raw, clean_noise=clean_noise)
+            if fix_headings:
+                text, added = restore_headings(text)
+                if added:
+                    notices.append(f"[info] {name}: restored {added} heading(s)")
+            if add_frontmatter:
+                text = f"---\nsource: {name}\n---\n\n{text}"
+            blocks.append(text)
+
         output = "\n\n---\n\n".join(blocks)
 
-        if notices:
+        # 调试注释块：知识库入库场景应关闭（会被向量化成噪音分段）；
+        # 排查参数/清洗问题时开启，notices 会显示收到的参数与每步处理结果。
+        if notices and output_notices:
             output = "<!-- conversion notices\n" + "\n".join(notices) + "\n-->\n\n" + output
 
         yield self.create_text_message(output)
+
+    def _describe_with_model(
+        self,
+        raw: str,
+        name: str,
+        tool_parameters: dict[str, Any],
+        describe_prompt: str,
+        notices: list[str],
+        uploaded: list[dict],
+    ) -> str:
+        """解析「视觉模型」参数并逐张生成图片描述。
+
+        model 参数为字符串「提供商ID/模型名」（model-selector 类型在知识库
+        流水线节点面板不受支持，会导致前端崩溃）。rpartition('/')：提供商
+        ID 本身含斜杠（如 langgenius/volcengine/volcengine），取最后一个 / 分割。
+        """
+        raw_model = str(tool_parameters.get("model", "") or "").strip()
+        provider, _sep, model_name = raw_model.rpartition("/")
+        model_config = None
+        if provider and model_name:
+            model_config = {
+                "provider": provider,
+                "model": model_name,
+                "mode": "chat",
+                "completion_params": {},
+            }
+        if not model_config:
+            notices.append(
+                f"[warn] {name}: 图片处理方式为生成描述，但未正确填写"
+                f"「视觉模型」（格式：提供商ID/模型名），跳过描述生成"
+            )
+            return raw
+        raw, n_d, n_df = _describe_images(
+            raw, self.session, model_config, name, notices,
+            uploaded=uploaded, prompt_text=describe_prompt,
+        )
+        if n_d or n_df:
+            notices.append(
+                f"[info] {name}: image descriptions generated {n_d}, failed {n_df}"
+            )
+        return raw
 
 
 # ------------------------------------------------------------------ 辅助函数
@@ -266,6 +326,10 @@ def _strip_images(text: str) -> str:
 _RE_MD_DATA_IMAGE = re.compile(
     r"!\[[^\]]*\]\(\s*data:image/([^;)]+);base64,([^)\s]+)\s*\)"
 )
+
+# http(s) 图片链接形态：![alt](https://...) —— MinerU 等上游解析器输出的
+# 图片已是 URL（非 base64），remove 模式下用它删除图片引用
+_RE_MD_HTTP_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*https?://[^)\s]+\s*\)")
 
 
 def _upload_images(
