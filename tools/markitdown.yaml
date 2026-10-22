@@ -24,6 +24,17 @@ parameters:
       en_US: Documents to convert (PDF, DOCX, PPTX, XLSX, HTML, images)
       zh_Hans: 待转换的文档（PDF、DOCX、PPTX、XLSX、HTML、图片）
     form: form
+  - name: add_frontmatter
+    type: boolean
+    required: false
+    default: false
+    label:
+      en_US: Add metadata frontmatter
+      zh_Hans: 添加元数据前置信息
+    human_description:
+      en_US: Prepend a YAML frontmatter block with the source filename. Useful for traceability.
+      zh_Hans: 在开头插入包含源文件名的 YAML frontmatter，便于溯源。
+    form: form
   - name: clean_noise
     type: boolean
     required: false
@@ -45,6 +56,28 @@ parameters:
     human_description:
       en_US: Detect chapter headings (一、/ （一）/ 1、) that Word stored as bold paragraphs instead of heading styles, and add # / ## / ### marks. Without this, parent-child chunking delimiters fail. Keep ON.
       zh_Hans: 识别 Word 中未套用标题样式、仅以加粗呈现的章节标题（一、/ （一）/ 1、），补上 # / ## / ### 标记。不开启则父子分段分隔符失效，建议保持开启。
+    form: form
+  - name: clean_pdf_headers
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Clean PDF headers/footers
+      zh_Hans: 清除 PDF 页眉页脚
+    human_description:
+      en_US: Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Only affects PDF files. Keep ON for PDF sources.
+      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉（公司名）、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
+    form: form
+  - name: pdf_header_keywords
+    type: string
+    required: false
+    default: ''
+    label:
+      en_US: PDF header keywords
+      zh_Hans: 页眉页脚特征词
+    human_description:
+      en_US: Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas. Combined with built-in hints (confidentiality marks, document numbers). Leave empty if your PDFs have no custom headers.
+      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。会与内置特征词（密级标识、文件编号、保密标识等）合并生效。PDF 无自定义页眉时留空即可。
     form: form
   - name: image_mode
     type: select
@@ -81,38 +114,16 @@ parameters:
       en_US: "Required when image handling is 'describe'. Format: provider-id/model-name, e.g. langgenius/volcengine_maas/doubao-seed-2-0-pro-260215. The provider id and model name are visible in Dify Settings -> Model Providers (hover/copy the model entry). Must be a vision-capable model."
       zh_Hans: "图片处理方式选「上传并生成描述」时必填。格式：提供商ID/模型名，例如 langgenius/volcengine_maas/doubao-seed-2-0-pro-260215。提供商 ID 和模型名可在 Dify「设置 → 模型供应商」里查看（把鼠标悬停在对应模型上可见完整标识）。必须是具备视觉能力的模型。"
     form: form
-  - name: clean_pdf_headers
-    type: boolean
-    required: false
-    default: true
-    label:
-      en_US: Clean PDF headers/footers
-      zh_Hans: 清除 PDF 页眉页脚
-    human_description:
-      en_US: Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Only affects PDF files. Keep ON for PDF sources.
-      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉（公司名）、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
-    form: form
-  - name: pdf_header_keywords
+  - name: describe_prompt
     type: string
     required: false
-    default: ''
+    default: '用不超过60个字的中文概括这张图片的核心内容：图片类型（流程图/审批图/界面截图/架构图等）+ 关键节点、模块或字段。只输出描述本身，不要思考过程、不要解释、不要引号、不要分点。'
     label:
-      en_US: PDF header keywords
-      zh_Hans: 页眉页脚特征词
+      en_US: Vision describe prompt
+      zh_Hans: 视觉模型提示词
     human_description:
-      en_US: Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas. Combined with built-in hints (confidentiality marks, document numbers). Leave empty if your PDFs have no custom headers.
-      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。会与内置特征词（密级标识、文件编号、保密标识等）合并生效。PDF 无自定义页眉时留空即可。
-    form: form
-  - name: add_frontmatter
-    type: boolean
-    required: false
-    default: false
-    label:
-      en_US: Add metadata frontmatter
-      zh_Hans: 添加元数据前置信息
-    human_description:
-      en_US: Prepend a YAML frontmatter block with the source filename. Useful for traceability.
-      zh_Hans: 在开头插入包含源文件名的 YAML frontmatter，便于溯源。
+      en_US: "Prompt sent to the vision model for each image (image handling = describe). Keep it short; the model output is used as-is."
+      zh_Hans: "图片处理方式选「上传并生成描述」时，发送给视觉模型的提示词。建议保持简短（60 字概括），模型输出会原样作为图片说明。"
     form: form
 extra:
   python:

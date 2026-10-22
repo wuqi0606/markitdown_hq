@@ -76,6 +76,7 @@ class MarkitdownTool(Tool):
         image_mode = str(tool_parameters.get("image_mode", "remove") or "remove").strip().lower()
         if image_mode not in {"remove", "url", "describe"}:
             image_mode = "remove"
+        describe_prompt = str(tool_parameters.get("describe_prompt", "") or "").strip()
 
         if not files:
             yield self.create_text_message("No files provided.")
@@ -159,7 +160,7 @@ class MarkitdownTool(Tool):
                     else:
                         raw, n_d, n_df = _describe_images(
                             raw, self.session, model_config, name, notices,
-                            uploaded=uploaded,
+                            uploaded=uploaded, prompt_text=describe_prompt,
                         )
                         if n_d or n_df:
                             notices.append(
@@ -353,6 +354,7 @@ def _describe_images(
     source_name: str,
     notices: list[str],
     uploaded: list[dict] | None = None,
+    prompt_text: str = "",
 ) -> tuple[str, int, int]:
     """对文本里的图片链接逐张调视觉模型生成描述，插在引用之前。
 
@@ -362,8 +364,10 @@ def _describe_images(
     签名 URL 是内网地址，云端模型供应商访问不到）：
     - docx 场景：uploaded 清单里带原始 base64（上传时留下的），直接用
     - MinerU 场景：只有 URL，由插件进程下载转 base64（含签名，可访问）
+    描述提示词可由 describe_prompt 参数自定义（默认 _DESCRIBE_PROMPT）。
     单张失败只跳过该图并记 notice。返回 (新文本, 成功数, 失败数)。
     """
+    prompt_text = (prompt_text or "").strip() or _DESCRIBE_PROMPT
     url_re = re.compile(r"!\[([^\]]*)\]\((https?://[^)]+)\)")
     targets = url_re.findall(text)
     if not targets:
@@ -395,7 +399,7 @@ def _describe_images(
             mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "image/jpeg")
             prompt = UserPromptMessage(
                 content=[
-                    TextPromptMessageContent(data=_DESCRIBE_PROMPT),
+                    TextPromptMessageContent(data=prompt_text),
                     ImagePromptMessageContent(
                         base64_data=b64, mime_type=mime, format=ext, filename=f"image-{i}"
                     ),
