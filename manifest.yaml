@@ -1,4 +1,4 @@
-version: 0.0.11
+version: 0.0.12
 type: plugin
 author: lolit
 name: markitdown_hq
@@ -16,11 +16,14 @@ resource:
   permission:
     tool:
       enabled: true
+    model:
+      enabled: true
+      llm: true
 plugins:
   tools:
     - provider/markitdown_hq.yaml
 meta:
-  version: 0.0.11
+  version: 0.0.12
   arch:
     - amd64
     - arm64
