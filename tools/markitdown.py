@@ -322,8 +322,9 @@ def _upload_images(
 
 
 _DESCRIBE_PROMPT = (
-    "用一句中文描述这张图片：它是什么类型（流程图/审批图/界面截图/组织架构图等），"
-    "包含哪些关键节点、步骤或字段。直接输出描述本身，不要任何前后缀或引号。"
+    "用不超过60个字的中文概括这张图片的核心内容："
+    "图片类型（流程图/审批图/界面截图/架构图等）+ 关键节点、模块或字段。"
+    "只输出描述本身，不要思考过程、不要解释、不要引号、不要分点。"
 )
 
 
@@ -401,7 +402,11 @@ def _describe_images(
                 ]
             )
             resp = llm.invoke(model_config=model_config, prompt_messages=[prompt], stream=False)
-            desc = str(resp.message.content or "").strip().strip('"')
+            desc = str(resp.message.content or "")
+            # 推理模型（如 doubao-seed）会把思维链包在 <think> 标签里输出，
+            # 必须剥离——否则思考碎片会污染知识库 chunk
+            desc = re.sub(r"<think>.*?</think>", "", desc, flags=re.S)
+            desc = desc.strip().strip('"').strip()
             if desc:
                 text = text.replace(f"![{_alt}]({url})", f"> 图片说明：{desc}\n![{_alt}]({url})", 1)
                 ok += 1
