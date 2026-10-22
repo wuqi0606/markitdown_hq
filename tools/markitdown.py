@@ -122,7 +122,9 @@ class MarkitdownTool(Tool):
             # describe=上传后再逐张调视觉模型生成描述，插在 URL 前。
             # 上传/描述必须在这里做（需要 self.session），不能放进纯文本的 _clean。
             if image_mode in {"url", "describe"}:
-                raw, n_up, n_fail = _upload_images(raw, self.session, name, notices)
+                raw, n_up, n_fail, uploaded = _upload_images(
+                    raw, self.session, name, notices
+                )
                 if n_up:
                     notices.append(f"[info] {name}: images uploaded {n_up}, failed {n_fail}")
                 raw = _strip_images(raw)  # 清掉上传失败残留的 data URI
@@ -135,7 +137,8 @@ class MarkitdownTool(Tool):
                         )
                     else:
                         raw, n_d, n_df = _describe_images(
-                            raw, self.session, model_config, name, notices
+                            raw, self.session, model_config, name, notices,
+                            uploaded=uploaded,
                         )
                         if n_d or n_df:
                             notices.append(
@@ -245,29 +248,34 @@ _RE_MD_DATA_IMAGE = re.compile(
 
 def _upload_images(
     text: str, session, source_name: str, notices: list[str]
-) -> tuple[str, int, int]:
+) -> tuple[str, int, int, list[dict]]:
     """把文本里的 base64 图片上传到 Dify 存储，替换为签名 URL。
 
     使用 SDK 的反向调用能力（session.file.upload），图片二进制
     存入 Dify 文件存储后拿到 preview_url（签名链接，有时效）。
     单张失败只删该图并在 notices 记录，不影响其余图片。
-    返回 (替换后文本, 成功数, 失败数)。
+    返回 (替换后文本, 成功数, 失败数, uploaded 清单)。
+    uploaded 清单元素：{"url": 签名链接, "b64": 原始 base64 字符串,
+    "mime": image/xxx}——b64 供 describe 模式直接内嵌模型请求，
+    免去按 URL 回源下载（签名 URL 是内网地址，模型供应商拉不到）。
     """
     if "data:image/" not in text:
-        return text, 0, 0
+        return text, 0, 0, []
 
     from dify_plugin.invocations.file import File
 
     file_invocation = File(session)
     out: list[str] = []
+    uploaded: list[dict] = []
     ok = fail = 0
     last = 0
     for i, m in enumerate(_RE_MD_DATA_IMAGE.finditer(text), start=1):
         out.append(text[last : m.start()])
         last = m.end()
         ext = m.group(1).lower()
+        b64_data = m.group(2)
         try:
-            data = base64.b64decode(m.group(2))
+            data = base64.b64decode(b64_data)
             resp = file_invocation.upload(
                 filename=f"{source_name}-image-{i}.{ext}",
                 content=data,
@@ -276,6 +284,9 @@ def _upload_images(
             url = (getattr(resp, "preview_url", None) or "").strip()
             if url:
                 out.append(f"![image]({url})")
+                uploaded.append(
+                    {"url": url, "b64": b64_data, "mime": f"image/{ext}", "ext": ext}
+                )
                 ok += 1
             else:
                 out.append("")
@@ -286,7 +297,7 @@ def _upload_images(
             fail += 1
             notices.append(f"[warn] {source_name}: image {i} upload failed: {exc}")
     out.append(text[last:])
-    return "".join(out), ok, fail
+    return "".join(out), ok, fail, uploaded
 
 
 _DESCRIBE_PROMPT = (
@@ -295,19 +306,48 @@ _DESCRIBE_PROMPT = (
 )
 
 
+def _fetch_image_b64(session, url: str) -> str | None:
+    """下载图片 URL 转 base64。用于 MinerU 场景——文本里只有 URL 没有字节。
+
+    关键：模型供应商（如豆包云端）拉不到内网签名 URL（10.x 私网地址），
+    所以图片必须以 base64 内嵌进模型请求，由插件进程（与 Dify 同网络）
+    负责取回字节。下载失败返回 None。
+    """
+    try:
+        import requests
+
+        resp = requests.get(url, timeout=60)
+        if resp.status_code != 200:
+            return None
+        return base64.b64encode(resp.content).decode()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _describe_images(
-    text: str, session, model_config: dict, source_name: str, notices: list[str]
+    text: str,
+    session,
+    model_config: dict,
+    source_name: str,
+    notices: list[str],
+    uploaded: list[dict] | None = None,
 ) -> tuple[str, int, int]:
     """对文本里的图片链接逐张调视觉模型生成描述，插在引用之前。
 
     使用 SDK 的 LLM 反向调用（session.model.llm.invoke），模型用平台
     上已配置的（model_selector 参数选的），不需要插件管凭据。
+    图片数据一律以 base64 内嵌进模型请求（不从 URL 让模型拉取——
+    签名 URL 是内网地址，云端模型供应商访问不到）：
+    - docx 场景：uploaded 清单里带原始 base64（上传时留下的），直接用
+    - MinerU 场景：只有 URL，由插件进程下载转 base64（含签名，可访问）
     单张失败只跳过该图并记 notice。返回 (新文本, 成功数, 失败数)。
     """
     url_re = re.compile(r"!\[([^\]]*)\]\((https?://[^)]+)\)")
     targets = url_re.findall(text)
     if not targets:
         return text, 0, 0
+
+    b64_by_url = {u["url"]: u["b64"] for u in (uploaded or [])}
 
     from dify_plugin.entities.model.message import (
         ImagePromptMessageContent,
@@ -320,13 +360,22 @@ def _describe_images(
     ok = fail = 0
     for i, (_alt, url) in enumerate(targets, start=1):
         try:
+            b64 = b64_by_url.get(url)
+            if b64 is None:
+                b64 = _fetch_image_b64(session, url)
+                if b64 is None:
+                    fail += 1
+                    notices.append(
+                        f"[warn] {source_name}: image {i} download failed (signed url not reachable)"
+                    )
+                    continue
             ext = url.rsplit(".", 1)[-1].lower() if "." in url.rsplit("/", 1)[-1] else "jpg"
             mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "image/jpeg")
             prompt = UserPromptMessage(
                 content=[
                     TextPromptMessageContent(data=_DESCRIBE_PROMPT),
                     ImagePromptMessageContent(
-                        url=url, mime_type=mime, format=ext, filename=f"image-{i}"
+                        base64_data=b64, mime_type=mime, format=ext, filename=f"image-{i}"
                     ),
                 ]
             )
