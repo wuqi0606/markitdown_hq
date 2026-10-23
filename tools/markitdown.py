@@ -54,6 +54,13 @@ _RE_TOC_LINK = re.compile(r"^\s*\[.+?\]\(#.+?\)\s*$")
 #   例：「某某科技股份有限公司 1」「附件一、各业务线标准交付周期表 9」
 # 仅在「目录」到下一个标题之间应用，避免误删正文里的数字结尾句子
 _RE_TOC_TAIL_NUM = re.compile(r"^\s*\S[^\n]{0,44}?\s+\d{1,3}\s*$")
+# 目录条目（点线形态，MinerU/PDF 目录页常见）：
+#   2.1.1. 登录................................ 16
+#   PDF 目录被抽成文本后，一条目一行或多条目连成一行（页码与下一条目标题粘连）。
+#   点线为连续半角点/间隔号/省略号；编号「2.1.1.」里的单点不触发。
+_RE_TOC_DOTSEG = re.compile(r"[^\n]*?(?:\.{3,}|·{3,}|…+)\s*\d{1,3}")
+# 点线目录行保护前缀：标题/图片/表格/链接行不做点线清理
+_TOC_DOT_PROTECT = ("#", "!", "|", "<", "[")
 # 连续 3 个以上空行压缩为 2 个
 _RE_MULTI_BLANK = re.compile(r"\n{3,}")
 
@@ -520,6 +527,24 @@ def _fix_table_sep_position(text: str) -> tuple[str, int]:
     return "\n".join(out), fixed
 
 
+def _is_toc_dotted(line: str) -> bool:
+    """点线目录行判定：标题＋点线（≥3 个点/·/…）＋页码。
+
+    命中两种形态：
+    - 单条目整行：'2.1.1. 登录........ 16'（fullmatch，防止误删页码后还有下文的正文句）
+    - 多条目连排一行：PDF 目录被抽成一行大段（≥2 个「点线+页码」段）
+    标题（#）、图片（!）、表格（|/<）、链接（[) 行不参与，防误伤。
+    """
+    s = line.strip()
+    if not s or s.startswith(_TOC_DOT_PROTECT):
+        return False
+    if s.startswith("- "):
+        s = s[2:].strip()
+    if len(_RE_TOC_DOTSEG.findall(s)) >= 2:
+        return True
+    return bool(_RE_TOC_DOTSEG.fullmatch(s))
+
+
 def _clean(raw: str, *, clean_noise: bool) -> str:
     text = raw or ""
     if not clean_noise:
@@ -541,12 +566,15 @@ def _clean(raw: str, *, clean_noise: bool) -> str:
     )
     text, tables_fixed = _fix_table_sep_position(text)
 
-    # 3. 目录残留 —— 两种形态：
+    # 3. 目录残留 —— 三种形态：
     #    (a) 带编号的「一、 xxx 3」/「[标题](#锚点)」，全文范围内清理
     #    (b) 降级残留「标题名 3」，只在「目录」到下一个标题之间清理
+    #    (c) 点线形态「2.1.1. 登录........ 16」（MinerU/PDF 目录页），全文清理
     out: list[str] = []
     in_toc = False
     for line in text.split("\n"):
+        if _is_toc_dotted(line):
+            continue
         if _RE_TOC_TEXT.match(line) or _RE_TOC_LINK.match(line):
             continue
         if line.strip() == "目录":
