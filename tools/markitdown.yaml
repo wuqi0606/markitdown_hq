@@ -139,7 +139,7 @@ parameters:
   - name: describe_prompt
     type: string
     required: false
-    default: '用不超过60个字的中文概括这张图片的核心内容：图片类型（流程图/审批图/界面截图/架构图等）+ 关键节点、模块或字段。只输出描述本身，不要思考过程、不要解释、不要引号、不要分点。'
+    default: '用不超过120个字的中文概括这张图片的核心内容：图片类型（流程图/审批图/界面截图/架构图等）+ 关键节点、模块或字段。只输出描述本身，不要思考过程、不要解释、不要引号、不要分点。'
     label:
       en_US: Vision describe prompt
       zh_Hans: 视觉模型提示词
