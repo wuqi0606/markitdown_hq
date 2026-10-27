@@ -15,7 +15,7 @@
 用法（作为 Dify 插件 Tool 调用）::
 
     invoke(files=[...], clean_noise=True, restore_headings=True,
-           add_frontmatter=False, image_mode='remove')
+           image_mode='remove')
 """
 
 from __future__ import annotations
@@ -85,7 +85,6 @@ class MarkitdownTool(Tool):
         # 插件跳过解析，仅做清洗与图片处理。与 files 二选一，文件优先。
         input_text = str(tool_parameters.get("text", "") or "").strip()
         clean_noise = _as_bool(tool_parameters.get("clean_noise", True), True)
-        add_frontmatter = _as_bool(tool_parameters.get("add_frontmatter", False), False)
         output_notices = _as_bool(tool_parameters.get("output_notices", True), True)
         fix_headings = _as_bool(tool_parameters.get("restore_headings", True), True)
         clean_pdf = _as_bool(tool_parameters.get("clean_pdf_headers", True), True)
@@ -201,8 +200,6 @@ class MarkitdownTool(Tool):
                 if res.renumbered:
                     notices.append(
                         f"[info] {name}: restored {res.renumbered} list number(s)")
-            if add_frontmatter:
-                text = f"---\nsource: {name}\n---\n\n{text}"
             blocks.append(text)
 
         # ---- 文本输入模式（MinerU 分支）----
@@ -236,8 +233,6 @@ class MarkitdownTool(Tool):
                 text = res.text
                 if res.added:
                     notices.append(f"[info] {name}: restored {res.added} heading(s)")
-            if add_frontmatter:
-                text = f"---\nsource: {name}\n---\n\n{text}"
             blocks.append(text)
 
         output = "\n\n---\n\n".join(blocks)
