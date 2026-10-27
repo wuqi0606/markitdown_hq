@@ -2,70 +2,112 @@
 """补齐 Markdown 中丢失的标题层级。
 
 背景：MarkItDown 靠 Word 的「标题1/2/3」样式映射生成 `#`。
-企业制度文件大量章节标题用的是**普通加粗段落**而非标题样式，
-转换后层级完全丢失，父子分段的 `\n# ` / `\n## ` 分隔符随之失效。
+企业制度文件大量章节标题用的是**普通段落**（手打编号，或 Word 自动编号），
+转换后层级完全丢失，父子分段的 `\\n# ` / `\\n## ` 分隔符随之失效。
 
-本模块从正文内容识别伪标题并补层级，规则与
-`tools/restore_headings.py`（本地批处理用）保持一致。
+标题分三类，信号强度递减：
 
-三条硬规则：
-1. **只有加粗的编号行才算伪标题**。Word 自动编号列表项
-   （`1. 发起申请`，非加粗）不是标题，补了会把层级压平。
-2. **补出的层级必须深于前面最近的真实标题**，否则出现「H1 套在 H2 里」的倒挂。
-3. **目录区块整体跳过**：目录标题与目录条目都不是正文结构。
+**R1 真实标题** —— mammoth 已经渲染成 `#` 的段落。
+    层级直接用 md 里的 `#` 数量（与 Word 样式表的 outlineLvl 一致）。
+    额外做两件事：去掉标题里多余的 `**`；把它的**编号形态**登记进作用域。
+
+**R2 强真标题** —— 作者设了大纲级别（`w:outlineLvl`）但 mammoth 没认出来的段落。
+    实测这类段落有 278 个被完全漏掉：样式名不是 `heading N`（中文 Word 常见），
+    或者作者直接在段落上设了大纲级别。
+    层级 = outlineLvl + 1（作者权威）；但要用字体/字号复核 ——
+    作者常把正文段落也设成大纲级别（「1、负责仓库管理制度的编制和优化」）。
+
+**R3 伪标题** —— 靠字号/字体/加粗/编号组投票推断出来的标题。
+    层级由**作用域栈**推断，不靠全局猜形态序。
+
+层级模型用**作用域栈**，维护一条「当前打开的章节链」：
+
+    map: 编号形态 → 层级
+    遇到标题形态 F：
+      - 关闭比 F 更细的形态（那些章节已经结束）
+      - 若 F 已在链上 → 同一层级（兄弟）
+      - 否则 → 比链上最深的形态深一层
+    遇到权威标题（R1/R2）：
+      - 登记形态 → 层级（层级由 XML 决定，不由形态决定）
+
+这样「（一）项目注销」(H2) 下面的「1. 发起申请」会自动变成 H3，
+而同一章里的第二个「1. xxx」还是 H3 —— 不需要全局猜形态序。
 """
 
-import re
+from __future__ import annotations
 
-# ---- 标题识别规则 ----
-# 四种编号形态按「从粗到细」的固定顺序排列；每份文档实际出现哪些形态，
-# 决定各形态映射到几级标题（动态层级，见 _build_level_map）。
-RE_CN_CHAPTER = re.compile(r"^\s*(?:第[一二三四五六七八九十]+[章节条]|[一二三四五六七八九十]+\s*[、.．])\s*\S")
+import re
+from dataclasses import dataclass, field
+
+from tools.docx_meta import (
+    FORM_RANK,
+    DocxMeta,
+    ParaMeta,
+    canonical_form,
+    form_from_text,
+    render_lvl_text,
+)
+
+# ---- 标题识别规则（纯文本路径用） ----
+RE_CHAPTER = re.compile(r"^\s*第[一二三四五六七八九十百]+\s*[章节]\s*\S")
+RE_ARTICLE = re.compile(r"^\s*第[一二三四五六七八九十百]+\s*条\s*\S")
+RE_CN = re.compile(r"^\s*[一二三四五六七八九十]+\s*[、.．]\s*\S")
 RE_NUM = re.compile(r"^\s*\d{1,2}\s*[、.．]\s*\S")
 RE_ATTACH = re.compile(r"^\s*附\s*件\s*[一二三四五六七八九十\d]+\s*[、.．]?\s*\S")
 RE_CN_PAREN = re.compile(r"^\s*[（(]\s*[一二三四五六七八九十]+\s*[)）]\s*\S")
 RE_NUM_PAREN = re.compile(r"^\s*[（(]\s*\d{1,2}\s*[)）]\s*\S")
 
-# 形态 key -> 检测正则。顺序即粗细顺序（cn 最粗，nump 最细）
 FORMS = [
-    ("attach", RE_ATTACH),
-    ("cn", RE_CN_CHAPTER),
-    ("num", RE_NUM),
+    ("chapter", RE_CHAPTER),
+    ("cn", RE_CN),
+    ("article", RE_ARTICLE),
     ("cnp", RE_CN_PAREN),
+    ("num", RE_NUM),
     ("nump", RE_NUM_PAREN),
 ]
-# 附件与中文章节同级（都是章级），不占独立层级
-_SAME_LEVEL_AS_PREV = {"attach"}
+_ATTACH_ALIAS = "attach"
 
 RE_EXISTING_H = re.compile(r"^\s*(#{1,6})\s")
-# 空标题：Word 里空段落套了标题样式，markitdown 转成一行光秃秃的 `#`
 RE_EMPTY_HEADING = re.compile(r"^\s*#{1,6}\s*$")
 RE_FM_DELIM = re.compile(r"^\s*---\s*$")
-# 目录标题：`目录` / `目 录` / `## 目录` / `目录：` 都算
 RE_TOC_MARK = re.compile(r"^\s*(?:#{1,6}\s*)?目\s*录\s*[:：]?\s*$")
-# 目录条目尾部带页码，不是真标题
 RE_TOC_TAIL = re.compile(r".*\s\d{1,3}$")
-# 标题后面允许跟一小段括号注释
 RE_ANNOTATION = re.compile(r"^\s*[（(][^)）]{0,60}[)）]\s*$")
 
-# 伪标题必须**整体加粗**，可选带数字编号前缀，允许尾部跟补充说明：
-#   `1. **预算制定**`                    → 前缀 "1. "，标题 "预算制定"
-#   `**（二）区域事业部**（指签署…）`     → 标题 "（二）区域事业部"，尾部 "（指签署…）"
 RE_BOLD_TITLE = re.compile(
     r"^\s*(?P<pre>(?:\d{1,2}\s*[、.．]\s*)?)\*\*(?P<title>.+?)\*\*(?P<post>.*)$"
 )
 
 MAX_TITLE_LEN = 45
-# 注意：不含「：」—— Word 里「评分标准：」这类冒号结尾短标题是真二级标题
 BAD_CHARS = set("。；！？，")
+SENT_END = set("。；！？，、；")
+# 含句读标点就不是标题（「第七条 …（1、…；）」以右括号收尾，末尾检查抓不到）
+SENT_PUNCT = set("。；！？，")
+
+
+@dataclass
+class HeadInfo:
+    """一个标题的判定结果（供回归脚本核验用）。"""
+
+    level: int
+    body: str
+    kind: str                # real | outlined | pseudo
+    form: str | None = None
+    line: int = 0            # 在输出文本中的行号
+    parent: int | None = None  # 父章节实例号（判断兄弟关系用）
+
+
+@dataclass
+class RestoreResult:
+    """补齐结果。"""
+
+    text: str
+    added: int = 0
+    heads: list[HeadInfo] = field(default_factory=list)
 
 
 def strip_bold(s: str) -> str:
-    """去掉 markdown 加粗/斜体标记。
-
-    必须先剥掉 `**`，否则 `**（一）定义**` 匹配不到二级标题规则 ——
-    这是标题层级全丢的直接原因。
-    """
+    """去掉 markdown 加粗/斜体标记。"""
     s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
     s = re.sub(r"__(.+?)__", r"\1", s)
     s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", s)
@@ -73,14 +115,7 @@ def strip_bold(s: str) -> str:
 
 
 def _bold_parts(raw: str) -> tuple[str, str, str] | None:
-    """拆解「加粗标题行」。
-
-    返回 (编号前缀, 加粗标题文本, 加粗之后的补充说明)；不是加粗行返回 None。
-
-    - `1. **预算制定**`                → ("1. ", "预算制定", "")
-    - `**（一）定义**`                  → ("", "（一）定义", "")
-    - `**（二）区域事业部**（指签署…）`  → ("", "（二）区域事业部", "（指签署…）")
-    """
+    """拆解「加粗标题行」→ (编号前缀, 加粗标题文本, 加粗之后的补充说明)。"""
     m = RE_BOLD_TITLE.match(raw)
     if not m:
         return None
@@ -93,16 +128,15 @@ def _bold_parts(raw: str) -> tuple[str, str, str] | None:
 
 
 def _form_of(text: str) -> str | None:
-    """返回标题文本命中的编号形态 key；不是候选标题返回 None。
-
-    `text` 是去掉加粗标记、并且已经剥掉尾部补充说明后的**纯标题文本**。
-    """
+    """返回标题文本命中的编号形态 key；不是候选标题返回 None。"""
     if not text or len(text) > MAX_TITLE_LEN:
         return None
     if BAD_CHARS & set(text):
         return None
     if RE_TOC_TAIL.match(text):
         return None
+    if RE_ATTACH.match(text):
+        return _ATTACH_ALIAS
     for key, pat in FORMS:
         if pat.match(text):
             return key
@@ -111,8 +145,6 @@ def _form_of(text: str) -> str | None:
 
 def _is_annotation(post: str) -> bool:
     """标题后面跟的内容，是不是「补充说明」而不是正文。
-
-    这是区分真标题与「列表项 + 行内加粗」的关键：
 
     - `**（二）区域事业部**（指签署合同部门…）` → 括号注释，是标题 ✓
     - `2.**当月**线上归档的合同/协议，…`          → 行内加粗强调，不是标题 ✗
@@ -127,17 +159,7 @@ def _is_annotation(post: str) -> bool:
 
 
 def _classify(raw: str) -> tuple[str, str, str] | None:
-    """判定该行是不是「加粗的编号标题」——真伪标题。
-
-    返回 (形态 key, 标题正文, 标题后的补充说明)；不是则返回 None。
-
-    这是区分伪标题与 Word 自动编号列表项的唯一可靠信号：
-    - `1. **预算制定**`  → Word 里的加粗段落，是真章节标题，应补 `#`
-    - `1. 发起申请`     → Word 的自动编号列表项（numPr），是列表内容，不该补 `#`
-
-    后者若被误升为标题，层级会被压平（列表项与真标题同级），
-    父子分段时整节内容会被并进同一个父段。
-    """
+    """判定该行是不是「加粗的编号标题」——真伪标题（纯文本路径）。"""
     parts = _bold_parts(raw)
     if parts is None:
         return None
@@ -164,7 +186,7 @@ def _normalize_heading(raw: str) -> str:
 
     Word 里「标题2 样式 + 加粗」的段落会被 markitdown 转成
     `## **借阅范围与权限**` —— 多余的 `**` 会污染标题文本，
-    也会让 `\n# ` 分隔符在带粗体的标题上匹配不到。
+    也会让 `\\n# ` 分隔符在带粗体的标题上匹配不到。
     """
     m = RE_EXISTING_H.match(raw)
     if not m:
@@ -176,57 +198,232 @@ def _normalize_heading(raw: str) -> str:
     return f"{hashes} {text.strip()}"
 
 
-def _build_level_map(lines: list[str]) -> dict[str, int]:
-    """扫描全文出现的编号形态，按粗细顺序分配层级。
+# ------------------------------------------------------------------ 作用域栈
 
-    例：文档同时出现「一、」和「1、」→ cn=1, num=2（招投标类制度）；
-    文档只有「1、」→ num=1。附件始终与中文章节同级。
 
-    只统计**加粗**的编号标题 —— 非加粗的编号行是 Word 自动编号列表项，
-    混进来会把层级映射算错。
+class Scope:
+    """当前打开的章节链：编号形态 → 层级。
+
+    形态序（从粗到细）：
+        chapter(第x章/第x部分) < cn(一、) < article(第x条) < cnp((一)) < num(1、) < nump((1))
+
+    链上「形态越粗 → 层级越浅」。进入某个形态时，**比它更细的形态全部关闭**
+    （那些章节已经结束）；比它更粗的父章节保留。
+    这样「一、xxx」下面的「（一）xxx」能自然落到下一层，
+    而遇到下一个「二、xxx」时又能正确地回到同一层。
     """
-    present: list[str] = []
-    seen = set()
-    for line in lines:
-        if RE_EXISTING_H.match(line):
-            continue
-        cls = _classify(line)
-        if cls is None:
-            continue
-        key = cls[0]
-        if key not in seen:
-            seen.add(key)
-            present.append(key)
-    level: dict[str, int] = {}
-    n = 1
-    for key in present:
-        if key in _SAME_LEVEL_AS_PREV and level:
-            level[key] = min(level.values())
+
+    def __init__(self) -> None:
+        self.map: dict[str, int] = {}   # 打开的章节 form -> level
+        self.ident: dict[str, int] = {}  # form -> 章节实例号（每次重开就换号）
+        self._seq = 0
+        self.real_floor: int = 0         # 最近一个权威标题的层级
+
+    def _renew(self, form: str) -> None:
+        """给形态换一个实例号 —— 表示「这一段章节是新的一个」。"""
+        self._seq += 1
+        self.ident[form] = self._seq
+
+    def _pop_finer(self, form: str) -> None:
+        """关闭比该形态更细的章节（那些章节已经结束）。"""
+        rank = FORM_RANK.get(form, 0)
+        for f in list(self.map):
+            if FORM_RANK.get(f, 0) > rank:
+                del self.map[f]
+                self.ident.pop(f, None)
+
+    def _coarser_max(self, form: str) -> int | None:
+        """链上比该形态更粗的章节里，最深的那个层级。"""
+        rank = FORM_RANK.get(form, 0)
+        lv = [lvl for f, lvl in self.map.items()
+              if FORM_RANK.get(f, 0) < rank]
+        return max(lv) if lv else None
+
+    def parent_ident(self, form: str | None) -> int | None:
+        """父章节的实例号 —— 用来判断两个同形态标题是不是兄弟。"""
+        if not form:
+            return None
+        rank = FORM_RANK.get(form, 0)
+        best = None
+        for f in self.map:
+            if FORM_RANK.get(f, 0) < rank:
+                if best is None or FORM_RANK.get(f, 0) > FORM_RANK.get(best, 0):
+                    best = f
+        return self.ident.get(best) if best else None
+
+    def level_for(self, form: str) -> int:
+        """推断标题的层级。"""
+        self._pop_finer(form)
+        if form in self.map:
+            # 该形态的章节还开着 → 同一层级（兄弟）
+            lvl = self.map[form]
         else:
-            level[key] = min(n, 6)
-            n += 1
-    return level
+            # 新开一层：比链上更粗的最深章节深一层
+            coarser = self._coarser_max(form)
+            lvl = (coarser + 1) if coarser is not None else self.real_floor + 1
+            self._renew(form)
+        lvl = min(lvl, 6)
+        self.map[form] = lvl
+        return lvl
+
+    def bind(self, form: str | None, level: int) -> None:
+        """登记一个真实标题（md 里的 `#`，层级由 Word 标题样式决定）。"""
+        self.real_floor = level
+        if form:
+            self._pop_finer(form)
+            self.map[form] = level
+            self._renew(form)
+        else:
+            # 形态未知：关闭同层及更深的章节，父章节保留
+            for f in list(self.map):
+                if self.map[f] >= level:
+                    del self.map[f]
+                    self.ident.pop(f, None)
+
+    def note(self, level: int) -> None:
+        """登记一个「强真标题」的层级（XML 大纲级别），作为上下文深度基准。"""
+        self.real_floor = level
 
 
-def restore_headings(text: str) -> tuple[str, int]:
-    """补齐标题层级，返回 (处理后文本, 补齐数量)。
+# ------------------------------------------------------------------ XML 判定
 
-    三条硬约束：
-    1. 只补**加粗**的编号标题。Word 自动编号列表项（`1. 发起申请`）不是标题，
-       补了会把层级压平。
-    2. 补出来的层级必须**深于**它前面最近的真实标题（Word 标题样式转出来的
-       `#` / `##`）。否则会出现「H1 出现在 H2 里面」的倒挂，
-       父子分段时整节内容会被并进同一个父段。
-    3. 目录区块整体跳过（目录标题行本身也会被删掉）。
+
+def _short_title(text: str, limit: int = 24) -> bool:
+    """短标题形态：不太长、不以句读结尾。"""
+    t = text.strip()
+    if not t or len(t) > limit:
+        return False
+    return not (SENT_END & set(t[-1:]))
+
+
+def _is_head_font(p: ParaMeta, meta: DocxMeta) -> bool:
+    """段落的字体是不是标题字体。"""
+    return bool(p.font) and p.font in meta.head_fonts
+
+
+def _is_bigger(p: ParaMeta, meta: DocxMeta) -> bool:
+    """段落的字号是不是比正文大。"""
+    if p.size is None or meta.base_size is None:
+        return False
+    return p.size > meta.base_size
+
+
+def _para_is_outlined(p: ParaMeta, meta: DocxMeta) -> bool:
+    """是不是「作者设了大纲级别、但 mammoth 没转成 `#`」的强真标题。
+
+    强真标题还要过一道复核：作者常把正文段落也设成大纲级别
+    （「1、负责仓库管理制度的编制和优化」就是 out=2 的正文）。
+    复核靠**字体/字号**——标题用黑体/楷体，正文用仿宋/宋体。
+    另外要求是「短标题」形态：长句即便标了大纲级别也当正文。
+    """
+    if p.outline is None:
+        return False
+    if p.in_table or p.in_toc or p.in_cover:
+        return False
+    text = p.text.strip()
+    if not text:
+        return False
+    if not _short_title(text):
+        return False
+    if SENT_PUNCT & set(text):
+        return False
+    # 字体 / 字号复核
+    if _is_head_font(p, meta) or _is_bigger(p, meta):
+        return True
+    return False
+
+
+def _para_is_pseudo(p: ParaMeta, meta: DocxMeta) -> bool:
+    """是不是伪标题（字号/字体/加粗/编号组投票推断出来的）。"""
+    if p.in_table or p.in_toc or p.in_cover:
+        return False
+    if p.outline is not None:
+        # 有大纲级别的走强真标题通道
+        return False
+
+    if p.is_auto_numbered:
+        # 自动编号：整组投票（组内全是短标题 → 整组是标题）
+        if p.key in meta.heading_groups:
+            return True
+        # 单条组要求加粗
+        return bool(p.bold) and _short_title(p.text)
+
+    # 手打编号的段落
+    if p.form is None:
+        return False
+    text = p.text.strip()
+    if not text or len(text) > MAX_TITLE_LEN:
+        return False
+    if SENT_PUNCT & set(text):
+        return False
+    if _is_bigger(p, meta):
+        return True
+    if _is_head_font(p, meta):
+        return True
+    if p.bold:
+        return True
+    return False
+
+
+def _para_form(p: ParaMeta, meta: DocxMeta) -> str | None:
+    """docx 段落的编号形态（用于层级映射）。"""
+    if p.is_auto_numbered:
+        # 优先用段落自身的形态；没有就用所属编号组的形态
+        if p.form is not None:
+            return p.form
+        return meta.group_form.get(p.key)
+    return canonical_form(p.form)
+
+
+def _number_prefix(p: ParaMeta, meta: DocxMeta) -> str:
+    """自动编号段落还原出来的原始编号前缀，如「一、」「（三）」。"""
+    if not (p.is_auto_numbered and p.lvl_text and p.num_id):
+        return ""
+    counters = p.counters or meta.num_counters.get(p.num_id, {})
+    return render_lvl_text(p.lvl_text, counters, p.num_fmt, p.ordinal or 1)
+
+
+def _heading_text(p: ParaMeta, meta: DocxMeta) -> str:
+    """标题正文。自动编号的段落把原始编号还原回来。"""
+    body = p.text.strip()
+    prefix = _number_prefix(p, meta)
+    if prefix:
+        body = f"{prefix}{body}"
+    return body
+
+
+def _md_text_of(line: str) -> str:
+    """md 行的纯文本（去掉标题标记与加粗）。"""
+    m = RE_EXISTING_H.match(line)
+    if m:
+        return strip_bold(line[m.end():]).strip()
+    return strip_bold(line).strip()
+
+
+# ------------------------------------------------------------------ 主流程
+
+
+def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
+    """补齐标题层级。
+
+    `meta` 为 docx 元数据（由 `docx_meta.parse_docx_meta` 产出）。
+    传入时用 XML 信号判定伪标题；为 None 时退回到纯文本规则。
     """
     lines = text.split("\n")
-    level_map = _build_level_map(lines)  # 先扫一遍定层级，再逐行改写
+
+    scope = Scope()
     out: list[str] = []
+    heads: list[HeadInfo] = []
     in_fm = False
     in_toc = False
     added = 0
     seen: set[str] = set()
-    real_level = 0  # 前一个真实标题的层级；0 = 还没有真实标题
+
+    if meta is not None and meta.paras:
+        from tools.md_aligner import align
+        alg = align("\n".join(lines), meta)
+    else:
+        alg = None
 
     for i, line in enumerate(lines):
         if i == 0 and RE_FM_DELIM.match(line):
@@ -245,7 +442,6 @@ def restore_headings(text: str) -> tuple[str, int]:
             continue
         if in_toc and line.startswith("#"):
             in_toc = False
-
         if in_toc:
             continue
 
@@ -253,33 +449,82 @@ def restore_headings(text: str) -> tuple[str, int]:
         if RE_EMPTY_HEADING.match(line):
             continue
 
-        # 真实标题：记录其层级，作为后续伪标题的层级下界
+        # ---- R1 真实标题（markitdown 生成的） ----
         existing = _real_heading_level(line)
         if existing is not None:
-            real_level = existing
-            out.append(_normalize_heading(line))
+            p = alg.get(i) if alg else None
+            form = _para_form(p, meta) if (p is not None and meta is not None) else None
+            if form is None:
+                form = canonical_form(_form_of(_md_text_of(line)))
+            scope.bind(form, existing)
+            body = _normalize_heading(line)
+            # Word 的自动编号由 Word 渲染，mammoth 不写进文本 ——
+            # 从 XML 还原回来，标题才和目录一致（「编制目的」→「一、编制目的」）
+            if p is not None and meta is not None:
+                prefix = _number_prefix(p, meta)
+                if prefix and not _md_text_of(body).startswith(prefix):
+                    body = f"{'#' * existing} {prefix}{_md_text_of(body)}"
+            out.append(body)
+            heads.append(HeadInfo(existing, _md_text_of(body), "real", form,
+                                  len(out) - 1, scope.parent_ident(form)))
             continue
 
-        # 非加粗的编号行 = Word 自动编号列表项，保持原样
+        # ---- XML 元数据路径 ----
+        if alg is not None and meta is not None:
+            p = alg.get(i)
+            if p is not None:
+                form = _para_form(p, meta)
+                # R2 强真标题：作者设了大纲级别，mammoth 没转
+                if _para_is_outlined(p, meta):
+                    # 层级同样走章节链 —— 作者的 outlineLvl 偶尔自相矛盾
+                    # （同一章里「一、xxx」标 outline=0、「二、xxx」标 outline=1），
+                    # 章节链按形态序推断更符合「兄弟同级」。
+                    # 注意：不抬 real_floor —— 层级已由章节链决定，
+                    # 再抬一次会自我放大（第X部分会一路涨到 H5）。
+                    lvl = (scope.level_for(form) if form
+                           else min(p.outline + 1, 6))
+                    body = _heading_text(p, meta)
+                    if body and body not in seen:
+                        seen.add(body)
+                        out.append("#" * lvl + " " + body)
+                        added += 1
+                        heads.append(HeadInfo(lvl, body, "outlined", form,
+                                              len(out) - 1, scope.parent_ident(form)))
+                        continue
+                # R3 伪标题
+                if _para_is_pseudo(p, meta):
+                    if form is not None:
+                        lvl = scope.level_for(form)
+                        body = _heading_text(p, meta)
+                        if body and body not in seen:
+                            seen.add(body)
+                            out.append("#" * lvl + " " + body)
+                            added += 1
+                            heads.append(HeadInfo(lvl, body, "pseudo", form,
+                                          len(out) - 1, scope.parent_ident(form)))
+                            continue
+            out.append(line)
+            continue
+
+        # ---- 纯文本路径 ----
         cls = _classify(line)
         if cls is None:
             out.append(line)
             continue
 
         key, body, post = cls
-        lvl = level_map.get(key)
-        # 层级锚定：必须深于前面的真实标题，否则倒挂
-        if lvl and real_level:
-            lvl = max(lvl, real_level + 1)
-        if lvl and body not in seen:
-            seen.add(body)          # 文档本身有重复章节名，去重
+        lvl = scope.level_for(key)
+        if body not in seen:
+            seen.add(body)
             out.append("#" * lvl + " " + body)
             added += 1
+            heads.append(HeadInfo(lvl, body, "pseudo", key,
+                                          len(out) - 1, scope.parent_ident(key)))
             if post:
-                # 标题后面的补充说明（如「（指签署合同部门…）」）保留为正文
                 out.append("")
                 out.append(post)
         else:
             out.append(line)
 
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)), added
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+    return RestoreResult(text=result, added=added, heads=heads)

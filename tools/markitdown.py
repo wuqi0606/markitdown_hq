@@ -30,6 +30,7 @@ from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 from markitdown import MarkItDown
 
+from tools.docx_meta import parse_docx_meta
 from tools.heading_restorer import restore_headings
 from tools.pdf_cleaner import clean_pdf_markdown
 
@@ -180,9 +181,13 @@ class MarkitdownTool(Tool):
             if fix_headings:
                 # 标题补齐必须在清洗之后 —— 清洗会把「一、 xxx 3」这类目录条目删掉，
                 # 先补标题的话目录残留会被误判成真标题
-                text, added = restore_headings(text)
-                if added:
-                    notices.append(f"[info] {name}: restored {added} heading(s)")
+                # docx 额外走 XML 元数据：字号/字体/编号组投票能识别出
+                # 纯文本看不出区别的伪标题（Word 自动编号的章节标题尤其明显）
+                meta = parse_docx_meta(blob) if hint == "zip" else None
+                res = restore_headings(text, meta)
+                text = res.text
+                if res.added:
+                    notices.append(f"[info] {name}: restored {res.added} heading(s)")
             if add_frontmatter:
                 text = f"---\nsource: {name}\n---\n\n{text}"
             blocks.append(text)
@@ -214,9 +219,10 @@ class MarkitdownTool(Tool):
 
             text = _clean(raw, clean_noise=clean_noise)
             if fix_headings:
-                text, added = restore_headings(text)
-                if added:
-                    notices.append(f"[info] {name}: restored {added} heading(s)")
+                res = restore_headings(text)
+                text = res.text
+                if res.added:
+                    notices.append(f"[info] {name}: restored {res.added} heading(s)")
             if add_frontmatter:
                 text = f"---\nsource: {name}\n---\n\n{text}"
             blocks.append(text)
