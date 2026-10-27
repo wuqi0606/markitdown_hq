@@ -47,6 +47,7 @@ from tools.docx_meta import (
     form_from_text,
     render_lvl_text,
 )
+from tools.num_prefix import restore_item_prefix
 
 # ---- 标题识别规则（纯文本路径用） ----
 RE_CHAPTER = re.compile(r"^\s*第[一二三四五六七八九十百]+\s*[章节]\s*\S")
@@ -104,6 +105,7 @@ class RestoreResult:
     text: str
     added: int = 0
     heads: list[HeadInfo] = field(default_factory=list)
+    renumbered: int = 0        # 还原掉 mammoth 错误序号的列表项数
 
 
 def strip_bold(s: str) -> str:
@@ -392,6 +394,20 @@ def _heading_text(p: ParaMeta, meta: DocxMeta) -> str:
     return body
 
 
+def _restore_item_prefix(line: str, p: ParaMeta | None,
+                         meta: DocxMeta) -> tuple[str, bool]:
+    """还原普通列表项的编号（不是标题的那些）。
+
+    mammoth 把不同编号体系的列表**合并重排**成连续序号，
+    「（1）」「1、」「(1)」全被渲染成 `1.` `2.` `3.`。
+    这里用 XML 的编号模板还原回去。
+    """
+    if p is None:
+        return line, False
+    new = restore_item_prefix(line, p, meta)
+    return new, new != line
+
+
 def _md_text_of(line: str) -> str:
     """md 行的纯文本（去掉标题标记与加粗）。"""
     m = RE_EXISTING_H.match(line)
@@ -417,6 +433,7 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
     in_fm = False
     in_toc = False
     added = 0
+    renumbered = 0
     seen: set[str] = set()
 
     if meta is not None and meta.paras:
@@ -503,6 +520,11 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
                             heads.append(HeadInfo(lvl, body, "pseudo", form,
                                           len(out) - 1, scope.parent_ident(form)))
                             continue
+            # 不是标题的普通行：还原 mammoth 合并重排掉的编号
+            # （原文的「（1）」「1、」「(1)」被渲染成了 `1.` `2.` `3.`）
+            line, fixed = _restore_item_prefix(line, p, meta)
+            if fixed:
+                renumbered += 1
             out.append(line)
             continue
 
@@ -527,4 +549,5 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
             out.append(line)
 
     result = re.sub(r"\n{3,}", "\n\n", "\n".join(out))
-    return RestoreResult(text=result, added=added, heads=heads)
+    return RestoreResult(text=result, added=added, heads=heads,
+                         renumbered=renumbered)

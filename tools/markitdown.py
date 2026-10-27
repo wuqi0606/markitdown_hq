@@ -198,6 +198,9 @@ class MarkitdownTool(Tool):
                 text = res.text
                 if res.added:
                     notices.append(f"[info] {name}: restored {res.added} heading(s)")
+                if res.renumbered:
+                    notices.append(
+                        f"[info] {name}: restored {res.renumbered} list number(s)")
             if add_frontmatter:
                 text = f"---\nsource: {name}\n---\n\n{text}"
             blocks.append(text)
