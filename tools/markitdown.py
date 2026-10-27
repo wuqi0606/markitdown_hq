@@ -31,6 +31,7 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 from markitdown import MarkItDown
 
 from tools.docx_meta import parse_docx_meta
+from tools.heading_normalizer import normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown
@@ -233,6 +234,17 @@ class MarkitdownTool(Tool):
                 text = res.text
                 if res.added:
                     notices.append(f"[info] {name}: restored {res.added} heading(s)")
+                # 标题层级归一化（必须在补齐之后）：
+                # 上游（MinerU）把文档章节标成 H2，与 Word 分支的「章节 = H1」
+                # 差一层 → 父子分段的父分隔符 `\n# ` 一个章节都匹配不到，
+                # 父块退化成「按长度硬切」：短文档整篇一块，长文档切在句子/
+                # 表格中间。Dify 检索时返回的是父块全文 → 分段不可用。
+                text, hstats = normalize_heading_levels(text)
+                if hstats["shifted"] or hstats["demoted"]:
+                    notices.append(
+                        f"[info] {name}: heading levels normalized "
+                        f"(shifted {hstats['shifted']}, demoted {hstats['demoted']})"
+                    )
             blocks.append(text)
 
         output = "\n\n---\n\n".join(blocks)

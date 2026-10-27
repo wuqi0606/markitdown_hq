@@ -32,8 +32,8 @@ parameters:
       en_US: Upstream parsed text
       zh_Hans: 上游解析文本
     human_description:
-      en_US: 'Markdown text parsed by an upstream parser (e.g. MinerU). The plugin skips parsing and only cleans up and processes images. Either this or Files is required.'
-      zh_Hans: 上游解析器输出的 Markdown 文本。跳过解析，仅做清洗与图片处理。与「文件」互斥。
+      en_US: 'Markdown text parsed by an upstream parser (e.g. MinerU). The plugin skips parsing and only cleans up and processes images. Heading levels are also normalized so chapters sit at the top level (required by Dify''s parent-child chunking). Either this or Files is required.'
+      zh_Hans: 上游解析器输出的 Markdown 文本。跳过解析，仅做清洗与图片处理。同时归一化标题层级：≥2 级标题上移一级，让章节落到一级标题（Dify 父子分段的父分隔符只认一级标题），否则父块会退化成按长度硬切。 与「文件」互斥。
     form: form
   - name: output_notices
     type: boolean
