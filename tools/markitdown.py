@@ -32,6 +32,7 @@ from markitdown import MarkItDown
 
 from tools.docx_meta import parse_docx_meta
 from tools.heading_restorer import restore_headings
+from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown
 
 # ------------------------------------------------------------------ 清洗规则
@@ -178,12 +179,21 @@ class MarkitdownTool(Tool):
                         f"table-sep {pstats['sep_rows_removed']}"
                     )
 
+            # docx 元数据：字号/字体/编号体系，用于补标题与修列表
+            meta = parse_docx_meta(blob) if hint == "zip" else None
+
+            # 列表修复必须在标题补齐之前 —— 畸形嵌套的 head 行长得像列表项，
+            # 先修成正常有序列表，标题判定才不会被它带偏
+            if meta is not None:
+                text, n_lists = fix_lists(text, meta)
+                if n_lists:
+                    notices.append(f"[info] {name}: fixed {n_lists} malformed list(s)")
+
             if fix_headings:
                 # 标题补齐必须在清洗之后 —— 清洗会把「一、 xxx 3」这类目录条目删掉，
                 # 先补标题的话目录残留会被误判成真标题
                 # docx 额外走 XML 元数据：字号/字体/编号组投票能识别出
                 # 纯文本看不出区别的伪标题（Word 自动编号的章节标题尤其明显）
-                meta = parse_docx_meta(blob) if hint == "zip" else None
                 res = restore_headings(text, meta)
                 text = res.text
                 if res.added:
