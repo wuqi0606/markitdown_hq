@@ -35,6 +35,7 @@ from tools.heading_normalizer import normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown
+from tools.table_splitter import convert_html_tables
 
 # ------------------------------------------------------------------ 清洗规则
 
@@ -234,6 +235,19 @@ class MarkitdownTool(Tool):
                 text = res.text
                 if res.added:
                     notices.append(f"[info] {name}: restored {res.added} heading(s)")
+                # HTML 表格 → Markdown（必须在标题补齐之后）：
+                # 上游（MinerU）把 PDF 里的表格转成 HTML，<td> / rowspan
+                # 这些标签既进向量当噪音，又让 Dify 的长度兜底切分切在
+                # 表格中间（实测用户手册被切出一块 3984 字的半截表格）。
+                # 转成 Markdown 后，跨页表格不再腰斩，HTML 标签清零。
+                # 超大表会按分组列插二级标题，紧随其后的标题层级归一化
+                # 会把它上移成一级 → 命中父分隔符 → 每组独立成一个父块。
+                text, tstats = convert_html_tables(text)
+                if tstats["converted"]:
+                    notices.append(
+                        f"[info] {name}: converted {tstats['converted']} html table(s)"
+                        + (f", split into {tstats['groups']} group(s)" if tstats["groups"] else "")
+                    )
                 # 标题层级归一化（必须在补齐之后）：
                 # 上游（MinerU）把文档章节标成 H2，与 Word 分支的「章节 = H1」
                 # 差一层 → 父子分段的父分隔符 `\n# ` 一个章节都匹配不到，
