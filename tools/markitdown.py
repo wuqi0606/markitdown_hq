@@ -35,7 +35,7 @@ from tools.heading_normalizer import normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown
-from tools.pdf_relevel import demote_deep_headings, relevel_headings
+from tools.pdf_relevel import demote_deep_headings, rebuild_dotted_headings, relevel_headings
 from tools.table_splitter import convert_html_tables
 
 # ------------------------------------------------------------------ 清洗规则
@@ -260,8 +260,12 @@ class MarkitdownTool(Tool):
                 #   章 = H1（父块边界）、条 = H2（子块边界）、款降回正文。
                 #   上游把普通条误判成章节的情况（`## 7、开票时限：`）会被纠正，
                 #   条目重新落回它所属的章，不会再把章从中间切断。
-                # - 点分十进制（1. / 1.1. / 1.1.1.）→ 层级由点数决定，
-                #   现有归一化已够用，不重排。
+                # - 点分十进制（1. / 1.1. / 1.1.1.）→ 层级由编号点数决定：
+                #   先归一化（把上游的 H2 拉回一级），再按点数重建
+                #   （depth2 → H1、depth3 → H2、目录级与 depth4+ → 正文）。
+                #   上游把点分体系的**所有**章节都标成 H2，归一化后的层级
+                #   只剩「有没有正文」这一个依据 → 章节标题和它自己的内容
+                #   被拆到两个父块（检索「2.2. 首页」会返回「退出」的正文）。
                 text, rstats = relevel_headings(text)
                 if rstats.get("system") == "dotted":
                     text, hstats = normalize_heading_levels(text)
@@ -269,6 +273,13 @@ class MarkitdownTool(Tool):
                         notices.append(
                             f"[info] {name}: heading levels normalized "
                             f"(shifted {hstats['shifted']}, demoted {hstats['demoted']})"
+                        )
+                    text, dstats = rebuild_dotted_headings(text)
+                    if dstats.get("h1") or dstats.get("h2") or dstats.get("demoted"):
+                        notices.append(
+                            f"[info] {name}: dotted headings rebuilt by number depth "
+                            f"(h1 {dstats.get('h1', 0)}, h2 {dstats.get('h2', 0)}, "
+                            f"demoted {dstats.get('demoted', 0)})"
                         )
                 else:
                     # 款级（### ）属于条的内容，留着标记会在切分后残留进向量文本

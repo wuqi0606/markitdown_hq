@@ -24,7 +24,10 @@ v0.0.23 的 ``heading_normalizer`` 做了「≥2 级标题整体上移一级」�
 * **点分十进制**：``1.`` ``1.1.`` ``1.1.1.`` —— 层级由点数决定。
 
 两者混用会互相干扰：形态序里 ``1、`` 是最细的一层，点分体系里 ``1.`` 是最粗的一层。
-所以先判定文档属于哪套，点分体系**原样保留**（它的一级标题已经是章节，够用）。
+所以先判定文档属于哪套：
+
+* **形态序** → 按作用域栈重排（``relevel_headings``）
+* **点分十进制** → 按编号点数重建（``rebuild_dotted_headings``）
 
 防误伤
 ------
@@ -40,11 +43,19 @@ import re
 from collections import Counter, defaultdict
 
 from tools.docx_meta import FORM_RANK, form_from_text
+from tools.heading_normalizer import _code_mask
 
 RE_HEAD = re.compile(r"^(#{1,6})[ \t]+(.*)$")
 
 # 点分十进制：1. / 1.1. / 1.1.1.（至少带一个点）
 RE_DOTTED = re.compile(r"^(\d+(?:\.\d+)+)\s*[.．、]?\s*(\S.*)$")
+
+# 点分十进制标题的深度（点数）。两种写法都要认：
+#   「2.2.1. 我的主页」—— 编号后带点
+#   「2.9.1.应签台账」  —— 编号后直接接文字
+# 分隔处必须是「点+空白」或「纯空白」，否则「3.5万元」这类标题会被误判成章节。
+RE_DOTTED_DEPTH_MULTI = re.compile(r"^(\d+(?:\.\d+)+)(?:\.\s*|\s+)(\S.*)$")
+RE_DOTTED_DEPTH_ONE = re.compile(r"^(\d+)\.\s+(\S.*)$")
 
 # 形态序
 RE_NUM_SEQ = re.compile(r"^(\d{1,2})\s*[、.．]\s*(\S.*)$")
@@ -233,6 +244,98 @@ def relevel_headings(text: str) -> tuple[str, dict[str, int]]:
             stats["promoted"] += 1
 
     stats["system"] = "seq"
+    return "\n".join(out), dict(stats)
+
+
+def _dotted_depth(title: str) -> int | None:
+    """点分十进制标题的深度（点数）。不是点分编号返回 None。
+
+    ``2.2.1. 我的主页`` → 3；``2.9.1.应签台账`` → 3；``1. 引言`` → 1。
+    """
+    t = title.strip()
+    m = RE_DOTTED_DEPTH_MULTI.match(t)
+    if m:
+        return len(m.group(1).split("."))
+    if RE_DOTTED_DEPTH_ONE.match(t):
+        return 1
+    return None
+
+
+def _followed_by_table(lines: list[str], i: int) -> bool:
+    """下一行非空内容是不是表格行。
+
+    ``table_splitter`` 拆分超大表时会插一个二级标题当分组标题，它后面紧跟表格。
+    这类标题是**表格的边界**，不能降成正文 —— 降了就等于把整张大表并回上一块。
+    """
+    for j in range(i + 1, len(lines)):
+        s = lines[j].strip()
+        if not s:
+            continue
+        return s.startswith("|")
+    return False
+
+
+def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
+    """点分十进制体系：按**编号点数**重建标题层级。
+
+    为什么
+    ------
+    上游（MinerU）把点分体系的**所有**章节都标成 ``##``，不区分点数。
+    ``heading_normalizer`` 的两条规则（≥2 级上移一级 + 空壳降级）叠加之后，
+    **层级实际由「标题后面有没有正文」决定，与编号点数毫无关系**（实测 43/43 吻合）：
+
+        有正文的 depth2/3 → H1（父块）
+        空壳的 depth2/3   → H2（并入上一个父块）
+
+    于是**章节标题和它自己的内容被拆到两个父块**：检索命中「2.2. 首页」这个子块时，
+    Dify 返回的是父块全文 = 上一节的正文 → 模型答非所问。
+
+    本函数把层级依据换成「编号点数」，与形态序体系「按编号形态重排」思路一致。
+
+    规则
+    ----
+    * depth2（``2.3.``）→ H1（父块边界）
+    * depth3（``2.3.1.``）→ H2（子块边界）
+    * depth1（``1.``，目录级）与 depth4+ → 正文
+    * 编号章节**内部**的非编号标题（「操作步骤」「合同卡片」「注意:」…）→ 正文
+    * 编号章节**之前**的非编号标题（如超大表拆分插入的分组标题）→ 保持原级别
+    """
+    lines = text.split("\n")
+    in_code = _code_mask(lines)
+    out: list[str] = []
+    stats: Counter = Counter()
+    in_numbered = False
+
+    for i, line in enumerate(lines):
+        m = RE_HEAD.match(line)
+        if not m or i in in_code:
+            out.append(line)
+            continue
+        title = m.group(2).strip()
+        depth = _dotted_depth(title)
+
+        if depth is None:
+            # 非编号标题
+            if in_numbered and not _followed_by_table(lines, i):
+                out.append(title)       # 编号章节内部 → 降为正文
+                stats["demoted"] += 1
+            else:
+                out.append(line)        # 独立区域 / 表格分组标题 → 保持原级别
+                stats["kept"] += 1
+            continue
+
+        in_numbered = True
+        if depth == 2:
+            out.append("# " + title)
+            stats["h1"] += 1
+        elif depth == 3:
+            out.append("## " + title)
+            stats["h2"] += 1
+        else:
+            out.append(title)           # depth1（目录级）与 depth4+ → 正文
+            stats["demoted"] += 1
+
+    stats["system"] = "dotted"
     return "\n".join(out), dict(stats)
 
 
