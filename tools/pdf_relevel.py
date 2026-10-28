@@ -106,16 +106,27 @@ def _is_table_row(line: str) -> bool:
 
 
 def _collect_candidates(lines: list[str]) -> list[tuple[str | None, int | None]]:
-    """每行的候选形态。"""
+    """每行的候选形态。
+
+    标题行也必须带序号
+    ------------------
+    上游（MinerU）把普通条误判成章节时，会写成 ``## 7、开票时限：``。
+    这行的形态是 ``num``、序号是 **7**，它必须参与「序号连续性」判定 ——
+    否则序列里会缺 7 而出现空洞：``1,2,3,4,5,6,__,8`` →
+    6 与 8 被判为不连续 → 8 判定为孤立条目 → 不提升为标题 →
+    留在 7 的正文里 → 8 与 7 落进同一个子分段。
+    """
     out = []
     for line in lines:
         is_head, title = _strip_head(line)
         if is_head:
             f = form_from_text(title)
-            if f is None:
+            n = None
+            if f == "num":
+                # 形态序的阿拉伯数字条目：取序号（超长行由 _seq_form 判定为不取）
+                _, n = _seq_form(title)
+            elif f is None:
                 f, n = _seq_form(title)
-            else:
-                n = None
             out.append((f, n))
         else:
             if _is_table_row(line):
