@@ -275,6 +275,19 @@ def _followed_by_table(lines: list[str], i: int) -> bool:
     return False
 
 
+def _is_shell_heading(lines: list[str], i: int) -> bool:
+    """标题后面紧跟另一个标题（中间没有正文）→ 空壳。
+
+    空壳标题自己没有内容 —— 它不该成为切分点，也不该单独占一个父块。
+    """
+    for j in range(i + 1, len(lines)):
+        s = lines[j].strip()
+        if not s:
+            continue
+        return bool(RE_HEAD.match(lines[j]))
+    return False
+
+
 def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
     """点分十进制体系：按**编号点数**重建标题层级。
 
@@ -294,17 +307,28 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
 
     规则
     ----
-    * depth2（``2.3.``）→ H1（父块边界）
+    * depth1（``1.``）与 depth2（``2.3.``）→ H1（父块边界）
     * depth3（``2.3.1.``）→ H2（子块边界）
-    * depth1（``1.``，目录级）与 depth4+ → 正文
+    * depth4+ → 正文
     * 编号章节**内部**的非编号标题（「操作步骤」「合同卡片」「注意:」…）→ 正文
     * 编号章节**之前**的非编号标题（如超大表拆分插入的分组标题）→ 保持原级别
+
+    顶层章节（depth1）
+    ----------------
+    depth1 是顶层章节（``1. 引言`` ``2. 功能说明``），必须自己**开启**一个父块 ——
+    降成正文会让它粘在前一节的末尾，检索「1. 引言」时返回的是上一节的内容。
+
+    但顶层章节常常是**空壳**（后面直接跟第一节，没有自己的正文）。空壳标题
+    单独占一个父块也不好看 —— 检索命中它只会拿到几个字。所以空壳的 depth1
+    与它后面**紧跟的第一个 depth2** 合并成一个父块（这与 Word 分支「父块首行
+    是章标题、章的内容跟在后面」的结构一致），depth2 降为 H2 留在同一块内。
     """
     lines = text.split("\n")
     in_code = _code_mask(lines)
     out: list[str] = []
     stats: Counter = Counter()
     in_numbered = False
+    shell_top = False      # 上一个编号标题是空壳的顶层章节（depth1）
 
     for i, line in enumerate(lines):
         m = RE_HEAD.match(line)
@@ -325,15 +349,27 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
             continue
 
         in_numbered = True
-        if depth == 2:
+        if shell_top and depth == 2:
+            # 空壳顶层章节后的第一个节 → 与它同父块
+            out.append("## " + title)
+            stats["h2"] += 1
+            stats["merged"] += 1
+            shell_top = False
+            continue
+
+        if depth <= 2:
+            # depth1（顶层章节）与 depth2（节级）→ 一级标题 = 父块边界
             out.append("# " + title)
             stats["h1"] += 1
         elif depth == 3:
             out.append("## " + title)
             stats["h2"] += 1
         else:
-            out.append(title)           # depth1（目录级）与 depth4+ → 正文
+            out.append(title)           # depth4+ → 正文
             stats["demoted"] += 1
+
+        # 顶层章节若自身没有正文（后面直接跟标题）→ 记下来，等下一个节来合并
+        shell_top = depth == 1 and _is_shell_heading(lines, i)
 
     stats["system"] = "dotted"
     return "\n".join(out), dict(stats)
