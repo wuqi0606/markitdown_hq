@@ -36,6 +36,7 @@ from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown
 from tools.pdf_relevel import demote_deep_headings, rebuild_dotted_headings, relevel_headings
+from tools.plain_headings import rebuild_plain_headings
 from tools.table_splitter import convert_html_tables
 
 # ------------------------------------------------------------------ 清洗规则
@@ -132,6 +133,9 @@ class MarkitdownTool(Tool):
                 )
                 continue
 
+            # md / txt 纯文本：没有魔数，靠扩展名认。走层级重建链路。
+            is_plain = _is_plain(name, blob)
+
             try:
                 # convert_stream 需要 file-like 对象，不能直接传 bytes。
                 # keep_data_uris：markitdown 的 html→md 阶段默认把 <img> 的
@@ -203,6 +207,22 @@ class MarkitdownTool(Tool):
                 if res.renumbered:
                     notices.append(
                         f"[info] {name}: restored {res.renumbered} list number(s)")
+
+            # md / txt 专属：补齐层级重建。
+            # 这段逻辑原本只挂在「上游解析文本」入口上（MinerU 专用），
+            # md / txt 走 files 入口会整段丢失 → 父分隔符 `\n# ` 匹配不到章节
+            # → 父块退化成「按长度硬切」（实测 md 挤成 1 个父块、txt 父子
+            # 结构彻底失效）。判据是「编号语义优先」，详见 plain_headings。
+            if is_plain:
+                text, pstats = rebuild_plain_headings(text)
+                notices.append(
+                    f"[info] {name}: plain headings rebuilt "
+                    f"(system {pstats.get('system')}, "
+                    f"h1 {pstats.get('h1', 0)}, h2 {pstats.get('h2', 0)}, "
+                    f"promoted {pstats.get('promoted', 0)}, "
+                    f"demoted {pstats.get('demoted', 0)}, "
+                    f"restored {pstats.get('restored', 0)})"
+                )
             blocks.append(text)
 
         # ---- 文本输入模式（MinerU 分支）----
@@ -378,6 +398,25 @@ def _format_hint(blob: bytes) -> str:
     if blob.startswith(_SIG_PDF):
         return "pdf"
     return "unknown"
+
+
+# 纯文本类扩展名：md / txt 没有文件魔数，只能靠扩展名识别。
+# 这些格式走「层级重建」链路（plain_headings），与 PDF 分支同一套策略。
+_PLAIN_EXTS = frozenset({".md", ".markdown", ".mdx", ".txt", ".text"})
+
+
+def _is_plain(name: str, blob: bytes) -> bool:
+    """是不是 md / txt 这类纯文本文件。
+
+    判据是扩展名 —— md/txt 没有文件魔数可认。同时排除 zip/pdf 魔数
+    （防止扩展名写着 .md 实际是 docx 的怪文件被误判）。
+    """
+    if blob.startswith(_SIG_ZIP) or blob.startswith(_SIG_OLE) or blob.startswith(_SIG_PDF):
+        return False
+    tail = name.rsplit(".", 1)
+    if len(tail) != 2:
+        return False
+    return "." + tail[1].lower() in _PLAIN_EXTS
 
 
 def _ext_of(name: str, hint: str) -> str:

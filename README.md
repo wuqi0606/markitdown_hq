@@ -101,7 +101,7 @@ MarkItDown 靠样式映射生成 `#`，样式没标就全丢了——
 插件 → 安装插件 → **通过 GitHub**：
 
 1. 仓库填：`https://github.com/wuqi0606/markitdown_hq`
-2. 版本选最新 tag（当前 `v0.0.28`），包文件选 `markitdown_hq-0.0.28.difypkg`
+2. 版本选最新 tag（当前 `v0.0.29`），包文件选 `markitdown_hq-0.0.29.difypkg`
 3. 安装
 
 > 插件逻辑变更后，知识库里已入库的旧文档不会自动更新，需要重跑流水线重新入库。
@@ -114,6 +114,18 @@ MarkItDown 靠样式映射生成 `#`，样式没标就全丢了——
 ```
 FILE  →  MarkItDown HQ  →  Parent-child Chunker  →  Knowledge Base
 ```
+
+### Markdown / TXT 分支
+
+```
+FILE  →  MarkItDown HQ  →  Parent-child Chunker  →  Knowledge Base
+```
+
+走「文件」入口即可，插件会自动补齐标题层级重建。
+
+> **md / txt 的标题层级会被重建**：这两类格式没有 docx 的 XML 结构，也没有 PDF 上游的章节标记 —— md 可能整篇都用 `##` 标章节，txt 则可能连标记都没有。层级不整理，父分隔符 `\n# ` 一个都匹配不到，父块会退化成「按长度硬切」。插件按**编号语义优先**处理：标题文本里带编号的（`2.1.1` / `一、` `（一）`）按编号重建层级；标题都不带编号的（人手写的 md）信任作者标的 `#` 级别；完全没有标记的（txt）按编号形态从正文推导。md 里的代码围栏会被保护，`# 注释` 与 `1. xxx` 这类行不会被误当标题。Word / PDF 分支不受影响。
+
+> **不要用 Dify 内置的文档提取器处理 md**：它的 `MarkdownExtractor` 会把 `#` 标记删掉（`re.sub(r"#", "", key)`），标题层级直接丢失。md 要走本插件。
 
 ### PDF 分支
 

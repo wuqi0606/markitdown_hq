@@ -21,8 +21,8 @@ parameters:
       en_US: Files
       zh_Hans: 文件
     human_description:
-      en_US: 'Documents to convert (PDF, DOCX, PPTX, XLSX, HTML, images). Either this or upstream text is required; files take priority.'
-      zh_Hans: 待转换的文档（PDF、DOCX、PPTX、XLSX、HTML、图片）。与「上游解析文本」二选一，两者都填时以文件为准。
+      en_US: 'Documents to convert (PDF, DOCX, PPTX, XLSX, MD, TXT, HTML, images). Either this or upstream text is required; files take priority.'
+      zh_Hans: 待转换的文档（PDF、DOCX、PPTX、XLSX、MD、TXT、HTML、图片）。与「上游解析文本」二选一，两者都填时以文件为准。
     form: form
   - name: text
     type: string
@@ -33,7 +33,7 @@ parameters:
       zh_Hans: 上游解析文本
     human_description:
       en_US: 'Markdown text parsed by an upstream parser (e.g. MinerU). The plugin skips parsing and only cleans up and processes images. Heading levels are normalized so chapters sit at the top level (required by Dify''s parent-child chunking), and for sequential numbering (一、/（一）/1、) the hierarchy is rebuilt from the numbering forms so chapters become level-1 and clauses level-2. HTML tables (MinerU emits them for PDF tables) are converted back to standard Markdown with merged cells expanded; oversized tables are split by their grouping column. Either this or Files is required.'
-      zh_Hans: 上游解析器输出的 Markdown 文本。跳过解析，仅做清洗与图片处理。同时归一化标题层级：≥2 级标题上移一级，让章节落到一级标题（Dify 父子分段的父分隔符只认一级标题），否则父块会退化成按长度硬切；形态序编号（一、/（一）/1、）的文档还会按编号形态重建从属关系，章=一级标题、条=二级标题，纠正上游把普通条目误判成章节的情况。HTML 表格（MinerU 的 PDF 表格输出形态）会转回标准 Markdown 并展开合并单元格，超大表按分组列拆开。 与「文件」互斥。
+      zh_Hans: 上游解析器输出的 Markdown 文本（用于 PDF 解析结果）。跳过解析，仅做清洗与图片处理。同时归一化标题层级：≥2 级标题上移一级，让章节落到一级标题（Dify 父子分段的父分隔符只认一级标题），否则父块会退化成按长度硬切；形态序编号（一、/（一）/1、）的文档还会按编号形态重建从属关系，章=一级标题、条=二级标题，纠正上游把普通条目误判成章节的情况。HTML 表格（MinerU 的 PDF 表格输出形态）会转回标准 Markdown 并展开合并单元格，超大表按分组列拆开。 与「文件」互斥。
     form: form
   - name: output_notices
     type: boolean
