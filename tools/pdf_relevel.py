@@ -1,0 +1,241 @@
+# -*- coding: utf-8 -*-
+"""PDF 分支的标题层级重排（形态序体系）。
+
+背景
+----
+上游解析器（MinerU）把章节标成二级标题（``## 一、目的``）。父子分段的父分隔符
+是 ``\\n# ``，只认一级标题 —— 差一层，父块会退化成按长度硬切。
+
+v0.0.23 的 ``heading_normalizer`` 做了「≥2 级标题整体上移一级」，把章节拉回一级，
+父块粒度对了。但它只看标题标记本身，**看不出标题之间的从属关系**，于是：
+
+* 上游误判的标题（把普通条目标成章节）也会被一起上移 → 独立成一个父块，
+  把真正的章节从中间切断；
+* 章下的条目仍是普通段落 → 子分隔符 ``\\n## `` 无事可切 → 父子结构退化为 1:1。
+
+本模块按**编号形态**重建层级：
+    一、目的      → H1（章）    ← 父块边界
+    （一）财务中心 → H2（条）   ← 子块边界
+    1、负责……    → H3（款）   ← 款属于条的内容，不单独标记
+
+两套编号体系必须分开处理
+----------------------
+* **形态序**：``一、`` ``（一）`` ``1、`` ``（1）`` —— 层级由作用域栈深度决定。
+* **点分十进制**：``1.`` ``1.1.`` ``1.1.1.`` —— 层级由点数决定。
+
+两者混用会互相干扰：形态序里 ``1、`` 是最细的一层，点分体系里 ``1.`` 是最粗的一层。
+所以先判定文档属于哪套，点分体系**原样保留**（它的一级标题已经是章节，够用）。
+
+防误伤
+------
+1. **长度上限**：超长的行不当作标题候选（长段落不是标题）。
+2. **序号连续性**：形态序里 ``num`` 形态（``1、`` ``2、``）只有在同一章内
+   **序号连续**时才提升为标题；孤立的 ``1、`` 保持正文。
+3. 已有 ``#`` 标记的标题一律保留（不丢上游判定）。
+"""
+
+from __future__ import annotations
+
+import re
+from collections import Counter, defaultdict
+
+from tools.docx_meta import FORM_RANK, form_from_text
+
+RE_HEAD = re.compile(r"^(#{1,6})[ \t]+(.*)$")
+
+# 点分十进制：1. / 1.1. / 1.1.1.（至少带一个点）
+RE_DOTTED = re.compile(r"^(\d+(?:\.\d+)+)\s*[.．、]?\s*(\S.*)$")
+
+# 形态序
+RE_NUM_SEQ = re.compile(r"^(\d{1,2})\s*[、.．]\s*(\S.*)$")
+RE_CN_SEQ = re.compile(r"^([一二三四五六七八九十]{1,3})\s*[、.．]\s*(\S.*)$")
+RE_NUM_PAREN = re.compile(r"^[（(]\s*(\d{1,2})\s*[)）]\s*(\S.*)$")
+RE_CN_PAREN = re.compile(r"^[（(]\s*([一二三四五六七八九十]{1,3})\s*[)）]\s*(\S.*)$")
+
+# 条目行长度上限：超长的行不当作标题候选
+MAX_ITEM_LEN = 240
+
+# 形态序体系里，作为「章」的形态（比它更细的都是它的下级）
+CHAPTER_FORMS = frozenset({"cn", "chapter", "article"})
+
+# 作用域边界：章级 + 条级。编号序列在每个作用域内重新开始
+SCOPE_FORMS = frozenset({"cn", "chapter", "article", "cnp"})
+
+
+def _strip_head(line: str) -> tuple[bool, str]:
+    """返回 (是否标题行, 标题文本)。"""
+    m = RE_HEAD.match(line)
+    if m:
+        return True, m.group(2).strip()
+    return False, line.strip()
+
+
+def has_dotted_numbering(titles: list[str]) -> bool:
+    """标题里出现 ``1.1.`` 这类点分十进制 -> 属于点分体系。"""
+    return any(RE_DOTTED.match(t) for t in titles)
+
+
+def _seq_form(text: str) -> tuple[str | None, int | None]:
+    """形态序编号 -> (形态, 序号)。不是编号返回 (None, None)。"""
+    t = text.strip()
+    if not t or len(t) > MAX_ITEM_LEN:
+        return None, None
+    m = RE_NUM_PAREN.match(t)
+    if m:
+        return "nump", int(m.group(1))
+    m = RE_CN_PAREN.match(t)
+    if m:
+        return "cnp", None
+    m = RE_NUM_SEQ.match(t)
+    if m:
+        return "num", int(m.group(1))
+    m = RE_CN_SEQ.match(t)
+    if m:
+        return "cn", None
+    return None, None
+
+
+def _is_table_row(line: str) -> bool:
+    """Markdown 表格行（``| 1 | 20190102 | ... |``）。
+
+    版本记录表里满是 ``| 1 |`` ``| 2 |``，会被编号正则误当成条目 ——
+    表格行的编号是「单元格内容」，不是章节编号，必须排除。
+    """
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|")
+
+
+def _collect_candidates(lines: list[str]) -> list[tuple[str | None, int | None]]:
+    """每行的候选形态。"""
+    out = []
+    for line in lines:
+        is_head, title = _strip_head(line)
+        if is_head:
+            f = form_from_text(title)
+            if f is None:
+                f, n = _seq_form(title)
+            else:
+                n = None
+            out.append((f, n))
+        else:
+            if _is_table_row(line):
+                out.append((None, None))
+                continue
+            f, n = _seq_form(title)
+            out.append((f, n))
+    return out
+
+
+def _promotable_num(lines: list[str], cand: list[tuple[str | None, int | None]]) -> set[int]:
+    """哪些 ``num`` 形态的行可以提升为标题。
+
+    规则：同一作用域内序号连续的那一段才提升；孤立的 ``1、`` 保持正文。
+    作用域 = 最近的**章级或条级**标题（``cn`` / ``chapter`` / ``article`` / ``cnp``）——
+    同一章下的不同 ``（一）（二）`` 各自是独立作用域，编号都从 1 重新开始。
+    已有 ``#`` 标记的 ``num`` 标题一律保留（不丢上游判定）。
+    """
+    # 作用域分组：遇到章级/条级形态就换作用域
+    group = 0
+    group_of = [0] * len(cand)
+    for i, (f, _) in enumerate(cand):
+        if f in SCOPE_FORMS:
+            group += 1
+        group_of[i] = group
+
+    by_group: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for i, (f, n) in enumerate(cand):
+        if f == "num" and n is not None:
+            by_group[group_of[i]].append((i, n))
+
+    promote: set[int] = set()
+    for items in by_group.values():
+        run = [items[0]]
+        best = list(run)
+        for prev, cur in zip(items, items[1:]):
+            if cur[1] == prev[1] + 1:
+                run.append(cur)
+                if len(run) > len(best):
+                    best = list(run)
+            else:
+                run = [cur]
+        if len(best) >= 2:
+            promote.update(i for i, _ in best)
+        # 上游已标成标题的 num 形态保留
+        for i, _ in items:
+            if RE_HEAD.match(lines[i]):
+                promote.add(i)
+    return promote
+
+
+def relevel_headings(text: str) -> tuple[str, dict[str, int]]:
+    """按编号形态重排标题层级。
+
+    返回 (新文本, 统计)。统计键：
+      system    —— 识别到的体系：``dotted`` / ``seq``
+      h1/h2/h3  —— 各层标题数
+      promoted  —— 从正文提升为标题的行数
+      kept      —— 保持原样的标题行数
+    """
+    lines = text.split("\n")
+    titles = [RE_HEAD.match(l).group(2).strip() for l in lines if RE_HEAD.match(l)]
+
+    if has_dotted_numbering(titles):
+        # 点分体系：一级标题已经是章节，原样保留
+        return text, {"system": "dotted", "kept": len(titles)}
+
+    cand = _collect_candidates(lines)
+    promote = _promotable_num(lines, cand)
+
+    stack: list[str] = []
+    out: list[str] = []
+    stats: Counter = Counter()
+
+    def level_for(form: str) -> int:
+        """作用域栈：形态 -> 层级。"""
+        nonlocal stack
+        while stack and FORM_RANK.get(stack[-1], 0) > FORM_RANK.get(form, 0):
+            stack.pop()
+        if stack and stack[-1] == form:
+            return len(stack)
+        stack.append(form)
+        return len(stack)
+
+    for i, line in enumerate(lines):
+        is_head, title = _strip_head(line)
+        form, _ = cand[i]
+
+        if form is None:
+            out.append(line)
+            if is_head:
+                stats["kept"] += 1
+            continue
+        if form == "num" and i not in promote:
+            out.append(line)
+            if is_head:
+                stats["kept"] += 1
+            continue
+
+        lv = level_for(form)
+        out.append("#" * min(lv, 6) + " " + title)
+        stats[f"h{lv}"] += 1
+        if not is_head:
+            stats["promoted"] += 1
+
+    stats["system"] = "seq"
+    return "\n".join(out), dict(stats)
+
+
+def demote_deep_headings(text: str, max_level: int = 2) -> str:
+    """把三级及更深的标题降回正文。
+
+    款级（``（1）``）属于条的内容，不需要独立标记 —— 留着 ``### `` 会在切分后
+    残留进向量文本，是纯噪音。
+    """
+    out = []
+    for line in text.split("\n"):
+        m = RE_HEAD.match(line)
+        if m and len(m.group(1)) > max_level:
+            out.append(m.group(2).strip())
+        else:
+            out.append(line)
+    return "\n".join(out)

@@ -35,6 +35,7 @@ from tools.heading_normalizer import normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown
+from tools.pdf_relevel import demote_deep_headings, relevel_headings
 from tools.table_splitter import convert_html_tables
 
 # ------------------------------------------------------------------ 清洗规则
@@ -253,12 +254,31 @@ class MarkitdownTool(Tool):
                 # 差一层 → 父子分段的父分隔符 `\n# ` 一个章节都匹配不到，
                 # 父块退化成「按长度硬切」：短文档整篇一块，长文档切在句子/
                 # 表格中间。Dify 检索时返回的是父块全文 → 分段不可用。
-                text, hstats = normalize_heading_levels(text)
-                if hstats["shifted"] or hstats["demoted"]:
-                    notices.append(
-                        f"[info] {name}: heading levels normalized "
-                        f"(shifted {hstats['shifted']}, demoted {hstats['demoted']})"
-                    )
+                #
+                # 两套编号体系分开处理：
+                # - 形态序（一、/（一）/1、/（1））→ 按作用域栈重排：
+                #   章 = H1（父块边界）、条 = H2（子块边界）、款降回正文。
+                #   上游把普通条误判成章节的情况（`## 7、开票时限：`）会被纠正，
+                #   条目重新落回它所属的章，不会再把章从中间切断。
+                # - 点分十进制（1. / 1.1. / 1.1.1.）→ 层级由点数决定，
+                #   现有归一化已够用，不重排。
+                text, rstats = relevel_headings(text)
+                if rstats.get("system") == "dotted":
+                    text, hstats = normalize_heading_levels(text)
+                    if hstats["shifted"] or hstats["demoted"]:
+                        notices.append(
+                            f"[info] {name}: heading levels normalized "
+                            f"(shifted {hstats['shifted']}, demoted {hstats['demoted']})"
+                        )
+                else:
+                    # 款级（### ）属于条的内容，留着标记会在切分后残留进向量文本
+                    text = demote_deep_headings(text, max_level=2)
+                    if rstats.get("h1") or rstats.get("h2"):
+                        notices.append(
+                            f"[info] {name}: heading levels releveled "
+                            f"(h1 {rstats.get('h1', 0)}, h2 {rstats.get('h2', 0)}, "
+                            f"promoted {rstats.get('promoted', 0)})"
+                        )
             blocks.append(text)
 
         output = "\n\n---\n\n".join(blocks)
