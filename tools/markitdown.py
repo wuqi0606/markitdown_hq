@@ -108,6 +108,7 @@ class MarkitdownTool(Tool):
         md = MarkItDown(enable_plugins=False)
         blocks: list[str] = []
         notices: list[str] = []
+        failures: list[str] = []
 
         # 调试回显：插件实际收到的关键参数（排查平台传值问题时用）
         notices.append(
@@ -150,7 +151,9 @@ class MarkitdownTool(Tool):
                 )
                 raw = result.markdown or ""
             except Exception as exc:  # noqa: BLE001
-                notices.append(f"[fail] {name}: {type(exc).__name__}: {exc}")
+                msg = f"{type(exc).__name__}: {exc}"
+                notices.append(f"[fail] {name}: {msg}")
+                failures.append(f"{name} — {msg}")
                 continue
 
             # 图片处理：remove=删掉 base64 引用；url=上传换签名链接；
@@ -313,6 +316,18 @@ class MarkitdownTool(Tool):
             blocks.append(text)
 
         output = "\n\n---\n\n".join(blocks)
+
+        # 全部文件都失败 → 输出明确的失败原因，而不是空字符串。
+        # 静默返回空会让「转换失败」和「文档本来就是空」无法区分，
+        # 排查时只能靠猜（曾因此把「缺 openpyxl 依赖」误判成「清洗逻辑有问题」）。
+        if files and not blocks and failures:
+            detail = "\n".join(f"- {f}" for f in failures)
+            output = (
+                f"[转换失败] {len(failures)} 个文件全部转换失败，未产出任何内容：\n"
+                f"{detail}\n"
+                "常见原因：文件类型不受支持、文件损坏、缺少转换依赖"
+                "（xlsx 需要 markitdown[xlsx]、pptx 需要 markitdown[pptx]）。"
+            )
 
         # 调试注释块：知识库入库场景应关闭（会被向量化成噪音分段）；
         # 排查参数/清洗问题时开启，notices 会显示收到的参数与每步处理结果。
