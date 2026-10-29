@@ -261,7 +261,7 @@ def _dotted_depth(title: str) -> int | None:
     return None
 
 
-# 章级形态序标题：「第一章 引言」「第二章 首页」「第三章 个人中心模块」。
+# 章级形态序标题：第X章 / 第X部分
 #
 # 混合编号体系：用户手册常用「章用中文序号、节用点分编号」的写法 ——
 #     第一章 引言          ← 形态序章级
@@ -274,6 +274,153 @@ def _dotted_depth(title: str) -> int | None:
 # （见 rebuild_dotted_headings 的 demote 分支）→ 父分隔符 `\n# ` 匹配不到 →
 # 该章被并进上一个父块，检索时返回的是上一章的内容。
 RE_SEQ_CHAPTER = re.compile(r"^\s*第[一二三四五六七八九十百]+\s*[章节部]")
+
+# 章级标题形态（带捕获组）：第X章 / 第X部分
+RE_CHAPTER_TITLE = re.compile(r"^\s*第([一二三四五六七八九十百]+)\s*([章节部])")
+
+# 点分小节的首段数字（用于验证「章号 ↔ 节号前缀」一致）
+#   `# 3.1 交付清单` → 3 ；`# 1.1. 编写目的` → 1
+RE_DOTTED_FIRST = re.compile(r"^#*\s*(\d+)(?:\.\d)+")
+
+# 中文数字 → 整数（章号用不到一百以上）
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+
+# 标题正文里出现这些字符 → 是句子，不是标题
+_TITLE_SENTENCE_CHARS = set("。；！？，、：")
+# 标题正文里出现 ASCII 句点 → 多半是目录残留（「个人中心模块.........17」）
+_TITLE_DOT = "."
+# 句子常见虚词（用于识别「第三章讲了…」这种正文行）。
+# 注意：**不能**用「个」「及」「以」等 —— 真实章节标题「个人中心模块」
+# 就含「个」，误伤会漏掉最该恢复的那一行。只保留几乎不出现在
+# 章节名里的强虚词。
+_TITLE_FUNCTION_WORDS = set("了的着过被把给从就都也还并而")
+
+# 章标题正文的最大长度（超出 → 是正文句子）
+MAX_CHAPTER_TITLE_LEN = 24
+
+# 章标题后面允许隔几行正文再遇到标题（正文插叙场景）
+_CHAPTER_LEAD_SCAN = 6
+
+
+def _cn_to_int(s: str) -> int | None:
+    """中文数字 → 整数（支持 一 ~ 九十九；章号够用）。"""
+    if not s:
+        return None
+    if "十" in s:
+        head, _, tail = s.partition("十")
+        if head and head not in _CN_DIGITS:
+            return None
+        if tail and tail not in _CN_DIGITS:
+            return None
+        tens = _CN_DIGITS[head] if head else 1
+        ones = _CN_DIGITS[tail] if tail else 0
+        return tens * 10 + ones
+    return _CN_DIGITS.get(s)
+
+
+def _chapter_ordinal(text: str) -> tuple[int, str] | None:
+    """「第X章 标题」→ (章号, 标题正文)；不是章标题返回 None。"""
+    m = RE_CHAPTER_TITLE.match(text.strip())
+    if not m:
+        return None
+    n = _cn_to_int(m.group(1))
+    if n is None:
+        return None
+    return n, text.strip()[m.end():].strip()
+
+
+def _title_like(rest: str) -> bool:
+    """章标题的正文部分是否像标题（而非一句话）。"""
+    if not rest or len(rest) > MAX_CHAPTER_TITLE_LEN:
+        return False
+    if _TITLE_SENTENCE_CHARS & set(rest):
+        return False
+    if _TITLE_DOT in rest:
+        return False
+    if _TITLE_FUNCTION_WORDS & set(rest):
+        return False
+    return True
+
+
+def _next_section_first(lines: list[str], i: int, in_code: set[int]) -> int | None:
+    """章标题后面第一个标题的首段数字；不是点分标题返回 None。
+
+    扫描时跳过正文行（章标题与第一个小节之间可能有一段引言），
+    但一旦遇到非点分标题就放弃 —— 说明这不是「章 → 节」的对应关系。
+    """
+    seen = 0
+    for j in range(i + 1, min(len(lines), i + 1 + _CHAPTER_LEAD_SCAN)):
+        if j in in_code:
+            continue
+        s = lines[j].strip()
+        if not s:
+            continue
+        seen += 1
+        if seen > _CHAPTER_LEAD_SCAN:
+            return None
+        if s.startswith("#"):
+            m = RE_DOTTED_FIRST.match(s)
+            return int(m.group(1)) if m else None
+        if RE_CHAPTER_TITLE.match(s):
+            return None          # 下一行就是另一个章 → 不是「章 → 节」
+    return None
+
+
+def _find_bare_chapters(lines: list[str], in_code: set[int]) -> dict[int, str]:
+    """找出上游漏标的「第X章」行 → {行号: 标题全文}。
+
+    上游（MinerU）按版面识别标题，章标题落在页底时可能漏标 ——
+    实测「第三章 个人中心模块」没带标记，被当成正文，父分隔符 `\\n# ` 匹配不到，
+    整章被并进上一章的父块。
+
+    判据（四条同时成立才提升，避免把正文里提到「第三章」的句子当标题）：
+    1. 形态是「第X章 + 短标题」，且标题部分不含句读与虚词；
+    2. 文档里已有**被标记**的「第X章」标题 → 本文档确实用这套编号做章节；
+    3. 章号与已标记的章号相邻（m±1）→ 是章节序列里缺的那一个；
+       同一章号已被标记过 → 是重复项，不提升；
+    4. 后面第一个标题是点分编号且首段数字 == 章号 → 「第三章」后面跟着
+       「3.1」，章号与节号前缀一致，是强证据（正文里偶然提到「第三章」
+       不会满足这条）。
+    """
+    marked_ords: set[int] = set()
+    for i, line in enumerate(lines):
+        if i in in_code:
+            continue
+        m = RE_HEAD.match(line)
+        if not m:
+            continue
+        oc = _chapter_ordinal(m.group(2))
+        if oc:
+            marked_ords.add(oc[0])
+    if not marked_ords:
+        return {}
+
+    # 允许的章号：与某个已标记章号相邻（序列里缺的那一个）
+    allowed: set[int] = set()
+    for m in marked_ords:
+        allowed.add(m + 1)
+        allowed.add(m - 1)
+
+    found: dict[int, str] = {}
+    for i, line in enumerate(lines):
+        if i in in_code or RE_HEAD.match(line):
+            continue
+        s = line.strip()
+        if not s or _is_table_row(line):
+            continue
+        oc = _chapter_ordinal(s)
+        if not oc:
+            continue
+        n, rest = oc
+        if n in marked_ords or n not in allowed:
+            continue
+        if not _title_like(rest):
+            continue
+        if _next_section_first(lines, i, in_code) != n:
+            continue
+        found[i] = s
+    return found
 
 
 def _followed_by_table(lines: list[str], i: int) -> bool:
@@ -354,6 +501,15 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
     """
     lines = text.split("\n")
     in_code = _code_mask(lines)
+
+    # 上游漏标的「第X章」→ 先恢复成一级标题，再走下面的重建逻辑。
+    # 漏标的后果很严重：章标题不是一级标题 → 父分隔符 `\n# ` 匹配不到 →
+    # 整章被并进上一章的父块（实测「第三章 个人中心模块」整章并进了第二章）。
+    bare = _find_bare_chapters(lines, in_code)
+    if bare:
+        for i, title in bare.items():
+            lines[i] = "# " + title
+
     out: list[str] = []
     stats: Counter = Counter()
     in_numbered = False
@@ -407,15 +563,22 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
         # 否则「第二章」和它下面的 2.1 会被父分隔符 `\n# ` 切开，
         # 检索命中 2.1 时返回的是它自己的标题，而不是第二章的正文。
         #
-        # depth3 及更深降为正文：混合文档里 depth2 已经是 H2，
-        # depth3 是它的子级 —— 而 Dify 父子分段只有 `\n# ` / `\n## ` 两级，
-        # 没有第三级子块可用，留着 `### ` 标记只会变成向量噪音。
+        # 混合文档的层级映射：
+        #   第X章            → H1（父块边界）
+        #   N.M   （章内节）  → H2（子块边界）
+        #   N.M.K（章内小节）→ H2（子块边界，与章内节同级）
+        #
+        # 为什么小节也用 H2 而不是降成正文：Dify 父子分段只有 `\n# ` / `\n## `
+        # 两级分隔符，小节没有第三级可用。但**降成正文会让标题与它的正文落进
+        # 不同的子块** —— 实测「3.1.1 正常立项」成了上一子块的末行，正文却成了
+        # 下一子块的首行：检索命中后模型看到的是标题、没有内容。
+        # 同级化（都当 H2）至少保证「标题 + 它的正文」在同一个子块里。
         if seq_chapter_seen:
-            if depth <= 2:
-                out.append("## " + title)   # 章内节 → H2（子块边界）
+            if depth <= 3:
+                out.append("## " + title)   # 章内节/小节 → H2（子块边界）
                 stats["h2"] += 1
             else:
-                out.append(title)           # 章内子节及更深 → 正文
+                out.append(title)           # depth4+ → 正文
                 stats["demoted"] += 1
             continue
 

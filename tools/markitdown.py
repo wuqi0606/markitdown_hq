@@ -34,7 +34,7 @@ from tools.docx_meta import parse_docx_meta
 from tools.heading_normalizer import normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
-from tools.pdf_cleaner import clean_pdf_markdown
+from tools.pdf_cleaner import clean_pdf_markdown, clean_upstream_headers
 from tools.pdf_relevel import demote_deep_headings, rebuild_dotted_headings, relevel_headings
 from tools.plain_headings import rebuild_plain_headings
 from tools.table_splitter import convert_html_tables
@@ -254,6 +254,25 @@ class MarkitdownTool(Tool):
                     )
 
             text = _clean(raw, clean_noise=clean_noise)
+
+            # 上游（MinerU）解析 PDF 时，页眉/页脚/页码会混进正文。
+            # text 入口必须单独做这一步 —— files 入口的 clean_pdf_markdown
+            # 走的是「同一行重复出现 N 次才算页眉」的启发式，而上游已经把
+            # 重复的页眉去掉了，残留的是**只出现 1 次**的那几行 → 那个启发式
+            # 正好失效（实测「编制：中科美络科技股份有限公司」+「14」清不掉）。
+            # 所以 text 入口用「用户填的关键词命中即删」，且要求整行就是关键词
+            # （可带「编制：」这类修饰语），避免误删正文里提到公司名的句子。
+            if clean_pdf and pdf_header_keywords:
+                text, upstats = clean_upstream_headers(
+                    text, header_keywords=pdf_header_keywords
+                )
+                if sum(upstats.values()):
+                    notices.append(
+                        f"[info] {name}: upstream headers cleaned "
+                        f"(headers {upstats['headers_removed']}, "
+                        f"page-numbers {upstats['page_nums_removed']})"
+                    )
+
             if fix_headings:
                 res = restore_headings(text)
                 text = res.text

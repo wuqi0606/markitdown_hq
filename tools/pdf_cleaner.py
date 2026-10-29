@@ -25,9 +25,20 @@ RE_LONE_PAGE_NO = re.compile(r"^\s*(?:\d{1,4}|[ivxlcdmIVXLCDM]{1,7})\s*$")
 # Markdown 表格分隔行（含 --- 或 ----）
 RE_TABLE_SEP = re.compile(r"^\|[\s:\-|]+\|$")
 # 通用页眉页脚特征词（不含任何公司名——公司名通过调用方参数传入）
+#
+# 必须是**元组**：写成括号拼接的单个字符串时，`re.escape` 会把其中的 `|`
+# 转义成字面量，整个特征词集合退化成一条永远匹配不到的文本
+# （实测「编制：中科美络科技股份有限公司」因此清不掉）。
 _DEFAULT_HINTS = (
-    "股份有限公司|内部使用|注意保密|文件密级|文件编号|文件标识|"
-    "绝密|机密|秘密"
+    "股份有限公司",
+    "内部使用",
+    "注意保密",
+    "文件密级",
+    "文件编号",
+    "文件标识",
+    "绝密",
+    "机密",
+    "秘密",
 )
 # 章节标题（不能当页眉删）
 RE_CHAPTER = re.compile(
@@ -42,6 +53,16 @@ RE_CHAPTER = re.compile(
 # 封面年份距页眉 5 行、正文孤立数字距页眉 43 行，取 3 留余量。
 _PAGE_NO_HEADER_DISTANCE = 3
 
+# 结构化行前缀：标题 / 图片 / 表格 / 链接 / 引用 —— 不参与页眉页脚判定
+_PROTECT_PREFIX = ("#", "!", "|", "<", "[", ">")
+
+# 页眉/页脚行的特征词去掉后，允许残留的「修饰语」长度上限。
+# 「编制：中科美络科技股份有限公司」去掉关键词后剩「编制：」→ 剥掉标点剩「编制」（2 字）→ 判定为页脚；
+# 「中科美络科技股份有限公司成立于2010年」去掉关键词后剩「成立于2010年」→ 含数字 → 判定为正文，保留。
+_MAX_HEADER_RESIDUE = 6
+# 判定为正文而非页眉的残留特征：数字（年份、页码、编号）
+_RESIDUE_DIGIT = re.compile(r"\d")
+
 
 def _build_header_pattern(extra_keywords: str = "") -> re.Pattern:
     """合并用户自定义关键词与通用特征词，构造页眉判定正则。
@@ -50,8 +71,94 @@ def _build_header_pattern(extra_keywords: str = "") -> re.Pattern:
     支持逗号/分号/空白分隔多个词。
     """
     words = [w.strip() for w in re.split(r"[,，;；|\s]+", extra_keywords or "") if w.strip()]
-    hints = "|".join(re.escape(w) for w in words + [_DEFAULT_HINTS])
+    hints = "|".join(re.escape(w) for w in words + list(_DEFAULT_HINTS))
     return re.compile(rf"({hints})")
+
+
+def _user_keyword_pattern(extra_keywords: str = "") -> re.Pattern | None:
+    """只包含用户自定义关键词的正则（不含通用特征词）。"""
+    words = [w.strip() for w in re.split(r"[,，;；|\s]+", extra_keywords or "") if w.strip()]
+    if not words:
+        return None
+    return re.compile("|".join(re.escape(w) for w in words))
+
+
+def _strip_edge_punct(s: str) -> str:
+    """剥掉字符串两端的标点与空白。"""
+    return s.strip(" \t:：,，。.、;；-—_()（）[]【】<>《》「」\"'“”‘’")
+
+
+def _is_header_footer_line(s: str, user_pattern: re.Pattern) -> bool:
+    """该行是否是「关键词 + 少量修饰语」的页眉/页脚行。
+
+    只看关键词命中是不够的 —— 正文里出现公司名很常见
+    （「中科美络科技股份有限公司成立于2010年」）。真正的页眉页脚是
+    **整行就是关键词**（可带「编制：」这类前缀），所以要求：
+    去掉关键词后，剩余部分剥掉标点后不含数字、且长度很短。
+    """
+    if not s or len(s) > 80:
+        return False
+    if s.startswith(_PROTECT_PREFIX):
+        return False
+    if RE_CHAPTER.match(s):
+        return False
+    if not user_pattern.search(s):
+        return False
+    residue = _strip_edge_punct(user_pattern.sub("", s))
+    if not residue:
+        return True                     # 整行就是关键词
+    if len(residue) > _MAX_HEADER_RESIDUE:
+        return False
+    if _RESIDUE_DIGIT.search(residue):
+        return False                    # 残留含数字 → 是正文句子
+    return True
+
+
+def clean_upstream_headers(
+    text: str, *, header_keywords: str = ""
+) -> tuple[str, dict]:
+    """清理**上游解析文本**（text 入口）里的页眉页脚与页码。
+
+    与 ``clean_pdf_markdown`` 的区别（两者判据不同，不能混用）：
+
+    * 上游（MinerU）已经清掉了大部分页眉页脚，**残留的是零星几行** ——
+      同一行只出现 1 次。而 ``clean_pdf_markdown`` 的「重复 N 次才算页眉」
+      启发式在这里正好失效（实测残留行只出现 1 次 → 清不掉）。
+      所以对**用户显式指定的关键词**，改成「命中即删」，但要求整行就是
+      关键词（可带少量修饰语），避免误删正文里提到公司名的句子。
+    * text 入口的表格已经是 Markdown，**不能删表格分隔行**
+      （`clean_pdf_markdown` 会删，那是给 files 入口的 HTML 表格用的）。
+    """
+    stats = {"headers_removed": 0, "page_nums_removed": 0}
+    user_pattern = _user_keyword_pattern(header_keywords)
+    if user_pattern is None:
+        return text, stats
+
+    lines = text.split("\n")
+    removed_idx: list[int] = []
+    out: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if _is_header_footer_line(s, user_pattern):
+            stats["headers_removed"] += 1
+            removed_idx.append(i)
+            continue
+        out.append((i, line))
+
+    # 页码：紧邻被删页眉/页脚（≤3 行）的孤立数字行一并删除。
+    # 上游抽取顺序不稳定 —— 页码可能在页脚之前或之后，所以按行距判定。
+    kept: list[str] = []
+    for i, line in out:
+        s = line.strip()
+        if RE_LONE_PAGE_NO.match(s) and removed_idx:
+            nearest = min(abs(i - h) for h in removed_idx)
+            if nearest <= _PAGE_NO_HEADER_DISTANCE:
+                stats["page_nums_removed"] += 1
+                continue
+        kept.append(line)
+
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+    return result.strip() + "\n", stats
 
 
 def _is_candidate_header(

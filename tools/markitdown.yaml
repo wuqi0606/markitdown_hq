@@ -76,8 +76,8 @@ parameters:
       en_US: Clean PDF headers/footers
       zh_Hans: 清除 PDF 页眉页脚
     human_description:
-      en_US: Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Only affects PDF files. Keep ON for PDF sources.
-      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉、页脚与页码。仅对 PDF 生效，源文件为 PDF 时建议保持开启。
+      en_US: 'Remove repeating headers (company name), footers and page numbers that PDF text extraction mixes into the body. Applies to both entries: PDF files passed in directly, and upstream parser output (MinerU) fed through the text field. Keep ON for PDF sources.'
+      zh_Hans: 清除 PDF 文本抽取时混入正文的重复页眉、页脚与页码。两条入口都生效：直接传入的 PDF 文件，以及走「上游解析文本」进来的解析器输出（MinerU）。源文件为 PDF 时建议保持开启。
     form: form
   - name: pdf_header_keywords
     type: string
@@ -87,8 +87,8 @@ parameters:
       en_US: PDF header keywords
       zh_Hans: 页眉页脚特征词
     human_description:
-      en_US: 'Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas.'
-      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。
+      en_US: 'Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas. For upstream parser output, a keyword matches the whole line (an optional prefix such as "Prepared by:" is allowed), so it also removes leftovers the parser did not strip.'
+      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。对「上游解析文本」入口，关键词按整行匹配（允许「编制：」这类前缀），因此也能清掉解析器没清干净的残留。
     form: form
   - name: image_mode
     type: select
