@@ -261,6 +261,21 @@ def _dotted_depth(title: str) -> int | None:
     return None
 
 
+# 章级形态序标题：「第一章 引言」「第二章 首页」「第三章 个人中心模块」。
+#
+# 混合编号体系：用户手册常用「章用中文序号、节用点分编号」的写法 ——
+#     第一章 引言          ← 形态序章级
+#     1.1. 编写目的        ← 点分（属于第一章）
+#     第二章 首页          ← 形态序章级
+#     2.1 项目经理工作台    ← 点分（属于第二章）
+#
+# 这种文档里，「第X章」是**顶层章节**，层级与点分体系的 depth1 相同（都是 H1）。
+# 少了这个识别，混合文档的章标题会被当成「编号章节内部的普通小标题」降成正文
+# （见 rebuild_dotted_headings 的 demote 分支）→ 父分隔符 `\n# ` 匹配不到 →
+# 该章被并进上一个父块，检索时返回的是上一章的内容。
+RE_SEQ_CHAPTER = re.compile(r"^\s*第[一二三四五六七八九十百]+\s*[章节部]")
+
+
 def _followed_by_table(lines: list[str], i: int) -> bool:
     """下一行非空内容是不是表格行。
 
@@ -310,8 +325,22 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
     * depth1（``1.``）与 depth2（``2.3.``）→ H1（父块边界）
     * depth3（``2.3.1.``）→ H2（子块边界）
     * depth4+ → 正文
+    * **形态序章级标题**（``第一章 引言`` ``第二章 首页``）→ H1（父块边界）
     * 编号章节**内部**的非编号标题（「操作步骤」「合同卡片」「注意:」…）→ 正文
     * 编号章节**之前**的非编号标题（如超大表拆分插入的分组标题）→ 保持原级别
+
+    混合编号体系
+    ------------
+    用户手册常把「章」写成中文序号、「节」写成点分编号：
+
+        第一章 引言
+        1.1. 编写目的
+        第二章 首页
+        2.1 项目经理工作台
+
+    两套编号混在一篇文档里。``第一章`` 这类**章级**标题与点分体系的 depth1
+    同级（都是顶层章节），必须走同一条 H1 分支；否则它会落进「非编号标题」
+    分支被降成正文 → 父分隔符匹配不到 → 整章被并进上一个父块。
 
     顶层章节（depth1）
     ----------------
@@ -329,6 +358,7 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
     stats: Counter = Counter()
     in_numbered = False
     shell_top = False      # 上一个编号标题是空壳的顶层章节（depth1）
+    seq_chapter_seen = False   # 文档含形态序章标题 → 点分编号是「章内」的层级
 
     for i, line in enumerate(lines):
         m = RE_HEAD.match(line)
@@ -339,6 +369,16 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
         depth = _dotted_depth(title)
 
         if depth is None:
+            # 形态序章级标题（第一章/第二章/第三部分）→ 顶层章节，与 depth1 同级。
+            # 混合编号文档里它必须自己开启一个父块。
+            if RE_SEQ_CHAPTER.match(title):
+                out.append("# " + title)
+                stats["h1"] += 1
+                stats["seq_chapter"] += 1
+                in_numbered = True
+                seq_chapter_seen = True
+                shell_top = False
+                continue
             # 非编号标题
             if in_numbered and not _followed_by_table(lines, i):
                 out.append(title)       # 编号章节内部 → 降为正文
@@ -355,6 +395,28 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
             stats["h2"] += 1
             stats["merged"] += 1
             shell_top = False
+            continue
+
+        # 混合编号文档：点分编号是「章内」的层级，整体下移一级。
+        #   第一章 引言          → H1（父块边界）
+        #   1.1. 编写目的        → H2（章内节）
+        #   1.1.1. 子节           → 正文（见下）
+        #   第二章 首页          → H1（父块边界）
+        #   2.1 项目经理工作台    → H2（章内节）
+        #
+        # 否则「第二章」和它下面的 2.1 会被父分隔符 `\n# ` 切开，
+        # 检索命中 2.1 时返回的是它自己的标题，而不是第二章的正文。
+        #
+        # depth3 及更深降为正文：混合文档里 depth2 已经是 H2，
+        # depth3 是它的子级 —— 而 Dify 父子分段只有 `\n# ` / `\n## ` 两级，
+        # 没有第三级子块可用，留着 `### ` 标记只会变成向量噪音。
+        if seq_chapter_seen:
+            if depth <= 2:
+                out.append("## " + title)   # 章内节 → H2（子块边界）
+                stats["h2"] += 1
+            else:
+                out.append(title)           # 章内子节及更深 → 正文
+                stats["demoted"] += 1
             continue
 
         if depth <= 2:
