@@ -103,7 +103,7 @@ MarkItDown 靠样式映射生成 `#`，样式没标就全丢了——
 插件 → 安装插件 → **通过 GitHub**：
 
 1. 仓库填：`https://github.com/wuqi0606/markitdown_hq`
-2. 版本选最新 tag（当前 `v0.0.31`），包文件选 `markitdown_hq-0.0.31.difypkg`
+2. 版本选最新 tag（当前 `v0.0.32`），包文件选 `markitdown_hq-0.0.32.difypkg`
 3. 安装
 
 > 插件逻辑变更后，知识库里已入库的旧文档不会自动更新，需要重跑流水线重新入库。
