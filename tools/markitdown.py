@@ -31,6 +31,11 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 from markitdown import MarkItDown
 
 from tools.docx_meta import parse_docx_meta
+from tools.heading_levels import (
+    DEFAULT_CHILD_DELIMITER,
+    DEFAULT_PARENT_DELIMITER,
+    LevelScheme,
+)
 from tools.heading_normalizer import normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.list_fixer import fix_lists
@@ -96,6 +101,18 @@ class MarkitdownTool(Tool):
         image_mode = str(tool_parameters.get("image_mode", "remove") or "remove").strip().lower()
         if image_mode not in {"remove", "url", "describe"}:
             image_mode = "remove"
+        # 分段器分隔符 → 标题级别。插件不知道用户在「父子文本分块」节点上
+        # 填了什么分隔符，所以让它直接填在这里：分隔符里 # 的个数决定
+        # 章节级/节级标题输出的级别，使标题层级与分块边界对齐。
+        parent_delimiter = str(
+            tool_parameters.get("parent_delimiter", DEFAULT_PARENT_DELIMITER)
+            or DEFAULT_PARENT_DELIMITER
+        )
+        child_delimiter = str(
+            tool_parameters.get("child_delimiter", DEFAULT_CHILD_DELIMITER)
+            or DEFAULT_CHILD_DELIMITER
+        )
+        scheme = LevelScheme.from_delimiters(parent_delimiter, child_delimiter)
         describe_prompt = str(tool_parameters.get("describe_prompt", "") or "").strip()
 
         if files and input_text:
@@ -115,7 +132,9 @@ class MarkitdownTool(Tool):
             f"[debug] received: image_mode={image_mode!r}, "
             f"model={str(tool_parameters.get('model', '') or '')!r}, "
             f"restore_headings={fix_headings}, clean_pdf={clean_pdf}, "
-            f"text_mode={bool(input_text)}"
+            f"text_mode={bool(input_text)}, "
+            f"parent_delim={parent_delimiter!r}, child_delim={child_delimiter!r}, "
+            f"levels=({scheme.describe()})"
         )
 
         for f in files:
@@ -203,7 +222,7 @@ class MarkitdownTool(Tool):
                 # 先补标题的话目录残留会被误判成真标题
                 # docx 额外走 XML 元数据：字号/字体/编号组投票能识别出
                 # 纯文本看不出区别的伪标题（Word 自动编号的章节标题尤其明显）
-                res = restore_headings(text, meta)
+                res = restore_headings(text, meta, scheme)
                 text = res.text
                 if res.added:
                     notices.append(f"[info] {name}: restored {res.added} heading(s)")
@@ -217,7 +236,7 @@ class MarkitdownTool(Tool):
             # → 父块退化成「按长度硬切」（实测 md 挤成 1 个父块、txt 父子
             # 结构彻底失效）。判据是「编号语义优先」，详见 plain_headings。
             if is_plain:
-                text, pstats = rebuild_plain_headings(text)
+                text, pstats = rebuild_plain_headings(text, scheme)
                 notices.append(
                     f"[info] {name}: plain headings rebuilt "
                     f"(system {pstats.get('system')}, "
@@ -274,7 +293,7 @@ class MarkitdownTool(Tool):
                     )
 
             if fix_headings:
-                res = restore_headings(text)
+                res = restore_headings(text, scheme=scheme)
                 text = res.text
                 if res.added:
                     notices.append(f"[info] {name}: restored {res.added} heading(s)")
@@ -308,7 +327,7 @@ class MarkitdownTool(Tool):
                 #   上游把点分体系的**所有**章节都标成 H2，归一化后的层级
                 #   只剩「有没有正文」这一个依据 → 章节标题和它自己的内容
                 #   被拆到两个父块（检索「2.2. 首页」会返回「退出」的正文）。
-                text, rstats = relevel_headings(text)
+                text, rstats = relevel_headings(text, scheme)
                 if rstats.get("system") == "dotted":
                     text, hstats = normalize_heading_levels(text)
                     if hstats["shifted"] or hstats["demoted"]:
@@ -316,7 +335,7 @@ class MarkitdownTool(Tool):
                             f"[info] {name}: heading levels normalized "
                             f"(shifted {hstats['shifted']}, demoted {hstats['demoted']})"
                         )
-                    text, dstats = rebuild_dotted_headings(text)
+                    text, dstats = rebuild_dotted_headings(text, scheme)
                     if dstats.get("h1") or dstats.get("h2") or dstats.get("demoted"):
                         notices.append(
                             f"[info] {name}: dotted headings rebuilt by number depth "
@@ -325,7 +344,7 @@ class MarkitdownTool(Tool):
                         )
                 else:
                     # 款级（### ）属于条的内容，留着标记会在切分后残留进向量文本
-                    text = demote_deep_headings(text, max_level=2)
+                    text = demote_deep_headings(text, max_level=scheme.child_level)
                     if rstats.get("h1") or rstats.get("h2"):
                         notices.append(
                             f"[info] {name}: heading levels releveled "

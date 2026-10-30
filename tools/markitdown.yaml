@@ -68,6 +68,28 @@ parameters:
       en_US: Detect chapter headings (一、/ （一）/ 1、) that Word stored as bold paragraphs instead of heading styles, and add # / ## / ### marks. Without this, parent-child chunking delimiters fail. Keep ON.
       zh_Hans: 识别 Word 中未套用标题样式、仅以加粗呈现的章节标题（一、/ （一）/ 1、），补上 # / ## / ### 标记。不开启则父子分段分隔符失效，建议保持开启。
     form: form
+  - name: parent_delimiter
+    type: string
+    required: false
+    default: '\n# '
+    label:
+      en_US: Parent delimiter
+      zh_Hans: 父块分隔符
+    human_description:
+      en_US: 'Fill in the same parent delimiter you configure on the Dify parent-child chunking node (e.g. \n# ). The number of # in it decides the heading level the plugin emits for chapter-level headings, so they align with your chunk boundaries.'
+      zh_Hans: '填写与 Dify「父子文本分块」节点上相同的父块分隔符（如 \n# ）。其中的 # 个数决定插件为章节级标题输出的标题级别，使标题层级与你的分块边界对齐。'
+    form: form
+  - name: child_delimiter
+    type: string
+    required: false
+    default: '\n## '
+    label:
+      en_US: Child delimiter
+      zh_Hans: 子块分隔符
+    human_description:
+      en_US: 'Fill in the same child delimiter you configure on the Dify parent-child chunking node (e.g. \n## ). The number of # in it decides the heading level the plugin emits for section-level headings.'
+      zh_Hans: '填写与 Dify「父子文本分块」节点上相同的子块分隔符（如 \n## ）。其中的 # 个数决定插件为节级标题输出的标题级别。'
+    form: form
   - name: clean_pdf_headers
     type: boolean
     required: false

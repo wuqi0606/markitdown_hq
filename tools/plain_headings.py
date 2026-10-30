@@ -55,6 +55,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from tools.heading_levels import CHILD, PARENT, LevelScheme
 from tools.heading_normalizer import _code_mask, normalize_heading_levels
 from tools.heading_restorer import restore_headings
 from tools.pdf_relevel import (
@@ -147,17 +148,24 @@ def _has_numbered_heading(lines: list[str], in_code: set[int] | None = None) -> 
     return False
 
 
-def _promote_dotted(text: str, in_code: set[int] | None = None) -> tuple[str, dict[str, int]]:
+def _promote_dotted(
+    text: str,
+    in_code: set[int] | None = None,
+    scheme: LevelScheme | None = None,
+) -> tuple[str, dict[str, int]]:
     """无标记的纯文本（点分体系）→ 按编号点数推导标题层级。
 
     点分体系里「点数 = 层级」是确定的，不需要看任何上下文：
 
-    * depth1 / depth2 → H1（父块边界）
-    * depth3 → H2（子块边界）
+    * depth1 / depth2 → PARENT（父块边界）
+    * depth3 → CHILD（子块边界）
     * depth4+ → 正文
 
-    与 ``rebuild_dotted_headings`` 的层级规则保持一致。
+    与 ``rebuild_dotted_headings`` 的层级规则保持一致；实际输出几级由
+    ``scheme``（来自用户填的父/子分隔符）决定。
     """
+    if scheme is None:
+        scheme = LevelScheme.default()
     out: list[str] = []
     stats: Counter = Counter()
     for i, line in enumerate(text.split("\n")):
@@ -171,11 +179,11 @@ def _promote_dotted(text: str, in_code: set[int] | None = None) -> tuple[str, di
             continue
         depth = len(m.group(1).split("."))
         if depth <= 2:
-            out.append("# " + s)
-            stats["h1"] += 1
+            out.append(scheme.marker(PARENT) + s)
+            stats["parent"] += 1
         elif depth == 3:
-            out.append("## " + s)
-            stats["h2"] += 1
+            out.append(scheme.marker(CHILD) + s)
+            stats["child"] += 1
         else:
             out.append(s)               # depth4+ → 正文
             stats["demoted"] += 1
@@ -243,7 +251,11 @@ class _CodeShield:
         return "\n".join(result)
 
 
-def _promote_seq(text: str, in_code: set[int] | None = None) -> tuple[str, dict[str, int]]:
+def _promote_seq(
+    text: str,
+    in_code: set[int] | None = None,
+    scheme: LevelScheme | None = None,
+) -> tuple[str, dict[str, int]]:
     """无标记的纯文本（形态序体系）→ 按编号形态推导标题层级。
 
     直接复用 PDF 分支的 ``relevel_headings``：它本身就支持从正文提升编号行
@@ -252,17 +264,21 @@ def _promote_seq(text: str, in_code: set[int] | None = None) -> tuple[str, dict[
     ``relevel_headings`` 不识别代码围栏 —— 代码块先被 ``_CodeShield`` 藏起来，
     处理完再放回去，避免 ``# 注释`` 被当成标题。
     """
+    if scheme is None:
+        scheme = LevelScheme.default()
     shield = _CodeShield(text) if in_code else None
     work = shield.text if shield else text
-    work, stats = relevel_headings(work)
-    work = demote_deep_headings(work, max_level=2)
+    work, stats = relevel_headings(work, scheme)
+    work = demote_deep_headings(work, max_level=scheme.child_level)
     if shield:
         work = shield.restore(work)
     stats["system"] = "seq"
     return work, stats
 
 
-def rebuild_plain_headings(text: str) -> tuple[str, dict[str, int]]:
+def rebuild_plain_headings(
+    text: str, scheme: LevelScheme | None = None
+) -> tuple[str, dict[str, int]]:
     """md / txt 的标题层级重建。
 
     返回 (新文本, 统计)。统计键 ``system`` 取值：
@@ -271,6 +287,8 @@ def rebuild_plain_headings(text: str) -> tuple[str, dict[str, int]]:
     * ``dotted``   —— 点分体系，按编号点数重建
     * ``seq``      —— 形态序体系，按编号形态重排
     """
+    if scheme is None:
+        scheme = LevelScheme.default()
     lines = text.split("\n")
     # 代码围栏内的行不参与标题判定（md 里的 ```python 块常含 `# 注释`）
     in_code = _code_mask(lines)
@@ -281,9 +299,9 @@ def rebuild_plain_headings(text: str) -> tuple[str, dict[str, int]]:
     if not heads:
         system = detect_system(lines, in_code)
         if system == "dotted":
-            return _promote_dotted(text, in_code)
+            return _promote_dotted(text, in_code, scheme)
         if system == "seq":
-            return _promote_seq(text, in_code)
+            return _promote_seq(text, in_code, scheme)
         # 连编号都没有 → 纯正文，保持原样
         return text, {"system": "plain", "kept": 0}
 
@@ -291,7 +309,7 @@ def rebuild_plain_headings(text: str) -> tuple[str, dict[str, int]]:
     if not _has_numbered_heading(lines, in_code):
         shield = _CodeShield(text) if in_code else None
         work = shield.text if shield else text
-        res = restore_headings(work)
+        res = restore_headings(work, scheme=scheme)
         out = shield.restore(res.text) if shield else res.text
         return out, {"system": "authored", "kept": len(heads),
                      "restored": res.added}
@@ -303,13 +321,13 @@ def rebuild_plain_headings(text: str) -> tuple[str, dict[str, int]]:
 
     if system == "dotted":
         work, _ = normalize_heading_levels(work)
-        work, dstats = rebuild_dotted_headings(work)
+        work, dstats = rebuild_dotted_headings(work, scheme)
         out = shield.restore(work) if shield else work
         dstats["system"] = "dotted"
         return out, dstats
 
-    work, rstats = relevel_headings(work)
-    work = demote_deep_headings(work, max_level=2)
+    work, rstats = relevel_headings(work, scheme)
+    work = demote_deep_headings(work, max_level=scheme.child_level)
     out = shield.restore(work) if shield else work
     rstats["system"] = "seq"
     return out, rstats

@@ -47,6 +47,7 @@ from tools.docx_meta import (
     form_from_text,
     render_lvl_text,
 )
+from tools.heading_levels import CHILD, DEEP, PARENT, LevelScheme
 from tools.num_prefix import restore_item_prefix
 
 # ---- 标题识别规则（纯文本路径用） ----
@@ -419,12 +420,42 @@ def _md_text_of(line: str) -> str:
 # ------------------------------------------------------------------ 主流程
 
 
-def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
+def _level_marker(lvl: int, scheme: LevelScheme) -> str:
+    """Word 标题层级 → Markdown 标记。
+
+    Word 的标题样式层级（Heading1/2/3…）先映射成语义角色，再由 ``scheme``
+    换算成实际输出的 ``#`` 数量：
+
+    * 第 1 层（Heading1，章）→ PARENT → 父分隔符对应的级别
+    * 第 2 层（Heading2，条）→ CHILD  → 子分隔符对应的级别
+    * 第 3 层及更深（Heading3，款）→ DEEP → 比子块更深一级
+
+    默认 scheme（父 1 级 / 子 2 级）下与历史行为逐字节一致。
+    """
+    if lvl <= 1:
+        return scheme.marker(PARENT)
+    if lvl == 2:
+        return scheme.marker(CHILD)
+    return scheme.marker(DEEP, lvl - 2)
+
+
+def restore_headings(
+    text: str,
+    meta: DocxMeta | None = None,
+    scheme: LevelScheme | None = None,
+) -> RestoreResult:
     """补齐标题层级。
 
     `meta` 为 docx 元数据（由 `docx_meta.parse_docx_meta` 产出）。
     传入时用 XML 信号判定伪标题；为 None 时退回到纯文本规则。
+
+    `scheme` 决定输出的**绝对级别**：Word 的标题样式层级（Heading1/2/3）
+    映射成语义角色（第 1 层 = PARENT、第 2 层 = CHILD、更深 = DEEP），
+    再由 scheme 换算成实际输出的 ``#`` 数量 —— 这样插件不必知道用户在
+    分段节点上填了什么分隔符（见 `heading_levels`）。
     """
+    if scheme is None:
+        scheme = LevelScheme.default()
     lines = text.split("\n")
 
     scope = Scope()
@@ -480,7 +511,10 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
             if p is not None and meta is not None:
                 prefix = _number_prefix(p, meta)
                 if prefix and not _md_text_of(body).startswith(prefix):
-                    body = f"{'#' * existing} {prefix}{_md_text_of(body)}"
+                    body = f"{_level_marker(existing, scheme)}{prefix}{_md_text_of(body)}"
+            else:
+                # 已有标记的标题：按语义层级重新编号（scheme 决定实际级别）
+                body = f"{_level_marker(existing, scheme)}{_md_text_of(body)}"
             out.append(body)
             heads.append(HeadInfo(existing, _md_text_of(body), "real", form,
                                   len(out) - 1, scope.parent_ident(form)))
@@ -503,7 +537,7 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
                     body = _heading_text(p, meta)
                     if body and body not in seen:
                         seen.add(body)
-                        out.append("#" * lvl + " " + body)
+                        out.append(_level_marker(lvl, scheme) + body)
                         added += 1
                         heads.append(HeadInfo(lvl, body, "outlined", form,
                                               len(out) - 1, scope.parent_ident(form)))
@@ -515,7 +549,7 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
                         body = _heading_text(p, meta)
                         if body and body not in seen:
                             seen.add(body)
-                            out.append("#" * lvl + " " + body)
+                            out.append(_level_marker(lvl, scheme) + body)
                             added += 1
                             heads.append(HeadInfo(lvl, body, "pseudo", form,
                                           len(out) - 1, scope.parent_ident(form)))
@@ -538,7 +572,7 @@ def restore_headings(text: str, meta: DocxMeta | None = None) -> RestoreResult:
         lvl = scope.level_for(key)
         if body not in seen:
             seen.add(body)
-            out.append("#" * lvl + " " + body)
+            out.append(_level_marker(lvl, scheme) + body)
             added += 1
             heads.append(HeadInfo(lvl, body, "pseudo", key,
                                           len(out) - 1, scope.parent_ident(key)))

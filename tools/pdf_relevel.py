@@ -43,6 +43,7 @@ import re
 from collections import Counter, defaultdict
 
 from tools.docx_meta import FORM_RANK, form_from_text
+from tools.heading_levels import BODY, CHILD, DEEP, PARENT, LevelScheme
 from tools.heading_normalizer import _code_mask
 
 RE_HEAD = re.compile(r"^(#{1,6})[ \t]+(.*)$")
@@ -189,15 +190,25 @@ def _promotable_num(lines: list[str], cand: list[tuple[str | None, int | None]])
     return promote
 
 
-def relevel_headings(text: str) -> tuple[str, dict[str, int]]:
-    """按编号形态重排标题层级。
+def relevel_headings(
+    text: str, scheme: LevelScheme | None = None
+) -> tuple[str, dict[str, int]]:
+    """按编号形态重排标题层级（形态序体系）。
 
     返回 (新文本, 统计)。统计键：
       system    —— 识别到的体系：``dotted`` / ``seq``
-      h1/h2/h3  —— 各层标题数
+      parent    —— 父块边界标题数
+      child     —— 子块边界标题数
+      deep      —— 更深层标题数（会被 ``demote_deep_headings`` 降回正文）
       promoted  —— 从正文提升为标题的行数
       kept      —— 保持原样的标题行数
+
+    语义深度 → 角色的映射：第 1 层 = PARENT，第 2 层 = CHILD，
+    第 3 层及更深 = DEEP（比子块更深，不与任何分隔符对齐）。
+    具体输出几级由 ``scheme`` 决定（见 ``heading_levels``）。
     """
+    if scheme is None:
+        scheme = LevelScheme.default()
     lines = text.split("\n")
     titles = [RE_HEAD.match(l).group(2).strip() for l in lines if RE_HEAD.match(l)]
 
@@ -238,8 +249,19 @@ def relevel_headings(text: str) -> tuple[str, dict[str, int]]:
             continue
 
         lv = level_for(form)
-        out.append("#" * min(lv, 6) + " " + title)
-        stats[f"h{lv}"] += 1
+        if lv == 1:
+            marker = scheme.marker(PARENT)
+        elif lv == 2:
+            marker = scheme.marker(CHILD)
+        else:
+            marker = scheme.marker(DEEP, lv - 2)
+        out.append(marker + title)
+        if lv == 1:
+            stats["parent"] += 1
+        elif lv == 2:
+            stats["child"] += 1
+        else:
+            stats["deep"] += 1
         if not is_head:
             stats["promoted"] += 1
 
@@ -450,7 +472,9 @@ def _is_shell_heading(lines: list[str], i: int) -> bool:
     return False
 
 
-def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
+def rebuild_dotted_headings(
+    text: str, scheme: LevelScheme | None = None
+) -> tuple[str, dict[str, int]]:
     """点分十进制体系：按**编号点数**重建标题层级。
 
     为什么
@@ -467,12 +491,18 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
 
     本函数把层级依据换成「编号点数」，与形态序体系「按编号形态重排」思路一致。
 
+    角色（而不是绝对级别）
+    ----------------------
+    本函数判定的是**语义角色**，具体输出几级由 ``scheme`` 决定 ——
+    ``scheme`` 来自用户填的父/子分隔符（见 ``heading_levels``）。
+    这样插件不必知道用户在分段节点上填了什么分隔符，也不会把级别写死。
+
     规则
     ----
-    * depth1（``1.``）与 depth2（``2.3.``）→ H1（父块边界）
-    * depth3（``2.3.1.``）→ H2（子块边界）
+    * depth1（``1.``）与 depth2（``2.3.``）→ **PARENT**（父块边界）
+    * depth3（``2.3.1.``）→ **CHILD**（子块边界）
     * depth4+ → 正文
-    * **形态序章级标题**（``第一章 引言`` ``第二章 首页``）→ H2（见下）
+    * **形态序章级标题**（``第一章 引言`` ``第二章 首页``）→ **PARENT**（见下）
     * 编号章节**内部**的非编号标题（「操作步骤」「合同卡片」「注意:」…）→ 正文
     * 编号章节**之前**的非编号标题（如超大表拆分插入的分组标题）→ 保持原级别
 
@@ -489,15 +519,17 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
     否则它会落进「非编号标题」分支被降成正文 → 父分隔符匹配不到 →
     整章被并进上一个父块。
 
-    混编文档的标记级别：章标题 = H2，章内点分节 = H2，章内子节 = H2
-    ----------------------------------------------------------
-    混编文档约定用 ``\\n## `` 切父块、``\\n### `` 切子块，因此**章标题与章内节
-    同为 H2** —— 同一套分隔符下，章、节都是父块边界。
+    混编文档的层级：章 = PARENT，章内点分节 = PARENT，章内子节 = PARENT
+    ------------------------------------------------------------------
+    混编文档里「章」与「章内的点分节」是**同一粒度的检索单元** ——
+    用户要的是「按 3.1、3.2 这样的小节做父分段」。所以章、节、子节
+    **同为父块边界**；子分隔符在本分支下无内容可切（父子结构退化为单块，
+    检索返回的仍是父块，内容正确）。
 
-    为什么章标题不能是 H1：Dify 是**纯文本分隔符切分**，不认标题的语义层级。
-    H1（``# 第X章``）不含 ``\\n## `` → 永远切不到 → 必然粘在**上一个**父块的
-    末尾（实测「# 第二章 首页」落在「1.4 系统业务流程」那个父块的末行）。
-    降成 H2 后它自己成为父块边界，章标题不再粘尾巴。
+    为什么章标题必须与章内节同级：Dify 是**纯文本分隔符切分**，不认标题的
+    语义层级。章标题若比节浅一级，它就不含父分隔符 → 永远切不到 → 必然粘在
+    **上一个**父块的末尾（实测「# 第二章 首页」落在「1.4 系统业务流程」那个
+    父块的末行）。同级后它自己成为父块边界，章标题不再粘尾巴。
 
     顶层章节（depth1）
     ----------------
@@ -507,16 +539,18 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
     但顶层章节常常是**空壳**（后面直接跟第一节，没有自己的正文）。空壳标题
     单独占一个父块也不好看 —— 检索命中它只会拿到几个字。所以空壳的 depth1
     与它后面**紧跟的第一个 depth2** 合并成一个父块（这与 Word 分支「父块首行
-    是章标题、章的内容跟在后面」的结构一致），depth2 降为 H2 留在同一块内。
+    是章标题、章的内容跟在后面」的结构一致），depth2 留在同一块内。
     """
+    if scheme is None:
+        scheme = LevelScheme.default()
     lines = text.split("\n")
     in_code = _code_mask(lines)
 
     # 上游漏标的「第X章」→ 先恢复成标题行，再走下面的重建逻辑。
     # 漏标的后果很严重：章标题不是标题 → 父分隔符匹配不到 →
     # 整章被并进上一章的父块（实测「第三章 个人中心模块」整章并进了第二章）。
-    # 这里先标成 H1 占位，下面的循环会按 RE_SEQ_CHAPTER 统一改写成 H2，
-    # 保证「被标记的章标题」与「被恢复的章标题」输出级别完全一致。
+    # 这里先标成 H1 占位，下面的循环会按 RE_SEQ_CHAPTER 统一改写成
+    # PARENT 级别，保证「被标记的章标题」与「被恢复的章标题」输出级别完全一致。
     bare = _find_bare_chapters(lines, in_code)
     if bare:
         for i, title in bare.items():
@@ -539,19 +573,18 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
         if depth is None:
             # 形态序章级标题（第一章/第二章/第三部分）→ 顶层章节。
             #
-            # 输出级别 = H2（不是 H1）：Dify 父子分段的父分隔符可配置，
-            # 混编文档约定用 `\n## ` 切父块、`\n### ` 切子块 ——
-            # 章标题与章内小节同为 H2，才能在同一个分隔符下都成为父块边界。
+            # 角色 = PARENT：与章内的点分节**同级**，让「章」和「节」在
+            # 同一套分隔符下都成为父块边界（用户要的是「按小节做父分段」）。
             #
             # 为什么章标题要跟小节同级，而不是更高一级：
             # Dify 是**纯文本分隔符切分**，不认标题的语义层级。
-            # 若章标题是 H1（`# 第X章`），它不含 `\n## ` → 永远切不到 →
+            # 若章标题比节浅一级，它就不含父分隔符 → 永远切不到 →
             # 必然粘在**上一个**父块的末尾（实测「# 第二章 首页」落在
             # 「1.4 系统业务流程」那个父块的末行）。
-            # 降级成 H2 后它自己成为父块边界，不再粘尾巴。
+            # 同级后它自己成为父块边界，不再粘尾巴。
             if RE_SEQ_CHAPTER.match(title):
-                out.append("## " + title)
-                stats["h2"] += 1
+                out.append(scheme.marker(PARENT) + title)
+                stats["parent"] += 1
                 stats["seq_chapter"] += 1
                 in_numbered = True
                 seq_chapter_seen = True
@@ -568,22 +601,24 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
 
         in_numbered = True
         if shell_top and depth == 2:
-            # 空壳顶层章节后的第一个节 → 与它同父块
-            out.append("## " + title)
-            stats["h2"] += 1
+            # 空壳顶层章节后的第一个节 → 与它同父块。
+            # 角色 = CHILD：它是「章」下面的第一个节，比章更深一级，
+            # 但仍留在同一个父块里（不自己开启父块）。
+            out.append(scheme.marker(CHILD) + title)
+            stats["child"] += 1
             stats["merged"] += 1
             shell_top = False
             continue
 
         # 混合编号文档：点分编号是「章内」的层级。
-        #   第一章 引言          → H2（父块边界）
-        #   1.1. 编写目的        → H2（父块边界，与章标题同级）
-        #   1.1.1. 子节           → H2（父块边界，与章内节同级）
-        #   第二章 首页          → H2（父块边界）
-        #   2.1 项目经理工作台    → H2（父块边界）
+        #   第一章 引言          → PARENT（父块边界）
+        #   1.1. 编写目的        → PARENT（父块边界，与章标题同级）
+        #   1.1.1. 子节           → PARENT（父块边界，与章内节同级）
+        #   第二章 首页          → PARENT（父块边界）
+        #   2.1 项目经理工作台    → PARENT（父块边界）
         #
-        # 混编文档约定用 `\n## ` 切父块 —— 章、节、子节**同为 H2**，
-        # 因此每个标题都自己开启一个父块，粒度 = 小节级。
+        # 章、节、子节**同为父块边界** —— 每个标题都自己开启一个父块，
+        # 粒度 = 小节级（用户要的「按 3.1、3.2 做父分段」）。
         #
         # 为什么子节也不降成正文：Dify 父子分段只有两级分隔符，但**降成正文
         # 会让标题与它的正文落进不同的块** —— 实测「3.1.1 正常立项」成了上一块
@@ -591,20 +626,21 @@ def rebuild_dotted_headings(text: str) -> tuple[str, dict[str, int]]:
         # 同级化至少保证「标题 + 它的正文」在同一个块里。
         if seq_chapter_seen:
             if depth <= 3:
-                out.append("## " + title)   # 章内节/小节 → H2（子块边界）
-                stats["h2"] += 1
+                out.append(scheme.marker(PARENT) + title)
+                stats["parent"] += 1
             else:
                 out.append(title)           # depth4+ → 正文
                 stats["demoted"] += 1
             continue
 
         if depth <= 2:
-            # depth1（顶层章节）与 depth2（节级）→ 一级标题 = 父块边界
-            out.append("# " + title)
-            stats["h1"] += 1
+            # depth1（顶层章节）与 depth2（节级）→ PARENT = 父块边界
+            out.append(scheme.marker(PARENT) + title)
+            stats["parent"] += 1
         elif depth == 3:
-            out.append("## " + title)
-            stats["h2"] += 1
+            # depth3（小节）→ CHILD = 子块边界
+            out.append(scheme.marker(CHILD) + title)
+            stats["child"] += 1
         else:
             out.append(title)           # depth4+ → 正文
             stats["demoted"] += 1
@@ -621,6 +657,10 @@ def demote_deep_headings(text: str, max_level: int = 2) -> str:
 
     款级（``（1）``）属于条的内容，不需要独立标记 —— 留着 ``### `` 会在切分后
     残留进向量文本，是纯噪音。
+
+    ``max_level`` 应传 ``scheme.child_level`` —— 只有与子分隔符对齐的层级
+    才需要保留标记，比它更深的一律降回正文（Dify 父子分段只有两级分隔符，
+    更深的层级没有对应的切分点，留着只是向量噪音）。
     """
     out = []
     for line in text.split("\n"):
