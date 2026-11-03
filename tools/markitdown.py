@@ -24,6 +24,7 @@ import base64
 import io
 import re
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from dify_plugin import Tool
@@ -566,6 +567,17 @@ _DESCRIBE_PROMPT = (
     "只输出描述本身，不要思考过程、不要解释、不要引号、不要分点。"
 )
 
+# 图片描述的并发度。
+#
+# 为什么需要并发：串行时每张图要「下载 + 调视觉模型」约 8 秒，
+# 一份 43 页的手册有 79 张图 → 650 秒，必然撞上 Dify 节点的 300 秒超时，
+# 文档直接入库失败（实测：36 张图的文档能过，51 / 79 张的过不去）。
+#
+# 并发安全性：SDK 的 backwards invoke 走 TCP 全双工通道，写端有锁、
+# 读端按 backwards_request_id 路由响应，Dify 自身的并行工具调用也是同一机制。
+# 线程池里每个任务自己下载、自己调模型，互不共享可变状态。
+_DESCRIBE_CONCURRENCY = 6
+
 
 def _fetch_image_b64(session, url: str) -> str | None:
     """下载图片 URL 转 base64。用于 MinerU 场景——文本里只有 URL 没有字节。
@@ -604,6 +616,10 @@ def _describe_images(
     - MinerU 场景：只有 URL，由插件进程下载转 base64（含签名，可访问）
     描述提示词可由 describe_prompt 参数自定义（默认 _DESCRIBE_PROMPT）。
     单张失败只跳过该图并记 notice。返回 (新文本, 成功数, 失败数)。
+
+    并发：多张图的描述在线程池里同时跑（见 _DESCRIBE_CONCURRENCY）。
+    计算与回填分开——并发阶段只产出「每张图的描述」，回填仍按图片在正文里
+    出现的先后顺序串行做，因此输出与串行版逐字节一致，notices 顺序也稳定。
     """
     prompt_text = (prompt_text or "").strip() or _DESCRIBE_PROMPT
     url_re = re.compile(r"!\[([^\]]*)\]\((https?://[^)]+)\)")
@@ -621,25 +637,22 @@ def _describe_images(
     from dify_plugin.invocations.model.llm import LLMInvocation
 
     llm = LLMInvocation(session)
-    ok = fail = 0
-    for i, (_alt, url) in enumerate(targets, start=1):
+
+    def describe_one(index: int, alt: str, url: str) -> tuple[str, str]:
+        """生成一张图的描述。返回 (描述, 错误信息)，两者不会同时非空。"""
         try:
             b64 = b64_by_url.get(url)
             if b64 is None:
                 b64 = _fetch_image_b64(session, url)
                 if b64 is None:
-                    fail += 1
-                    notices.append(
-                        f"[warn] {source_name}: image {i} download failed (signed url not reachable)"
-                    )
-                    continue
+                    return "", "download failed (signed url not reachable)"
             ext = url.rsplit(".", 1)[-1].lower() if "." in url.rsplit("/", 1)[-1] else "jpg"
             mime = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(ext, "image/jpeg")
             prompt = UserPromptMessage(
                 content=[
                     TextPromptMessageContent(data=prompt_text),
                     ImagePromptMessageContent(
-                        base64_data=b64, mime_type=mime, format=ext, filename=f"image-{i}"
+                        base64_data=b64, mime_type=mime, format=ext, filename=f"image-{index}"
                     ),
                 ]
             )
@@ -649,15 +662,39 @@ def _describe_images(
             # 必须剥离——否则思考碎片会污染知识库 chunk
             desc = re.sub(r"<think>.*?</think>", "", desc, flags=re.S)
             desc = desc.strip().strip('"').strip()
-            if desc:
-                text = text.replace(f"![{_alt}]({url})", f"> 图片说明：{desc}\n![{_alt}]({url})", 1)
-                ok += 1
-            else:
-                fail += 1
-                notices.append(f"[warn] {source_name}: image {i} empty description")
+            if not desc:
+                return "", "empty description"
+            return desc, ""
         except Exception as exc:  # noqa: BLE001
+            return "", f"describe failed: {exc}"
+
+    def run(index: int, alt: str, url: str) -> tuple[str, str]:
+        """包一层，保证单个任务异常不会让整个线程池崩掉。"""
+        try:
+            return describe_one(index, alt, url)
+        except Exception as exc:  # noqa: BLE001
+            return "", f"describe failed: {exc}"
+
+    # 并发跑描述；结果按提交顺序取回，保证与正文里的图片顺序一一对应
+    workers = max(1, min(_DESCRIBE_CONCURRENCY, len(targets)))
+    if workers == 1:
+        results = [run(i, alt, url) for i, (alt, url) in enumerate(targets, start=1)]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(run, i, alt, url)
+                for i, (alt, url) in enumerate(targets, start=1)
+            ]
+            results = [f.result() for f in futures]
+
+    ok = fail = 0
+    for i, ((desc, err), (alt, url)) in enumerate(zip(results, targets), start=1):
+        if err:
             fail += 1
-            notices.append(f"[warn] {source_name}: image {i} describe failed: {exc}")
+            notices.append(f"[warn] {source_name}: image {i} {err}")
+            continue
+        text = text.replace(f"![{alt}]({url})", f"> 图片说明：{desc}\n![{alt}]({url})", 1)
+        ok += 1
     return text, ok, fail
 
 
