@@ -112,6 +112,28 @@ parameters:
       en_US: 'Fill in the same child delimiter you configure on the Dify parent-child chunking node (e.g. \n## ). The number of # in it decides the heading level the plugin emits for section-level headings.'
       zh_Hans: '用于子分块的分隔符'
     form: form
+  - name: strip_heading_numbers
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Strip heading numbers
+      zh_Hans: 剥除标题编号
+    human_description:
+      en_US: 'Remove chapter numbers from heading lines (2.7.1. 合同起草 → 合同起草). Numbers dilute the vector, so pure semantic queries match better. Turn OFF if you need to locate sections by their number.'
+    zh_Hans: '剥除标题行开头的章节编号（2.7.1. 合同起草 → 合同起草）。编号在向量检索里是噪声，剥掉后按语义词检索更容易命中。关闭后将无法按章节号定位内容。'
+    form: form
+  - name: isolate_image_blocks
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: Isolate image blocks
+      zh_Hans: 图片独立成块
+    human_description:
+      en_US: 'Put each image (and its description) into its own sub-chunk, so the long signed URL no longer dilutes the surrounding text. The image stays in the same parent chunk, so it is still returned when the text is recalled.'
+    zh_Hans: '把每张图片（连同它的描述）单独放进一个子块，避免长长的签名链接稀释周边正文的语义。图片仍留在同一个父块内，正文被召回时图片照常返回。'
+    form: form
   - name: image_mode
     type: select
     required: false

@@ -33,12 +33,16 @@ from markitdown import MarkItDown
 
 from tools.docx_meta import parse_docx_meta
 from tools.heading_levels import (
+    CHILD,
     DEFAULT_CHILD_DELIMITER,
     DEFAULT_PARENT_DELIMITER,
     LevelScheme,
+    parse_delimiter_level,
 )
 from tools.heading_normalizer import normalize_heading_levels
+from tools.heading_numbers import strip_heading_numbers
 from tools.heading_restorer import restore_headings
+from tools.image_blocks import isolate_image_blocks
 from tools.list_fixer import fix_lists
 from tools.pdf_cleaner import clean_pdf_markdown, clean_upstream_headers
 from tools.pdf_relevel import demote_deep_headings, rebuild_dotted_headings, relevel_headings
@@ -115,6 +119,12 @@ class MarkitdownTool(Tool):
         )
         scheme = LevelScheme.from_delimiters(parent_delimiter, child_delimiter)
         describe_prompt = str(tool_parameters.get("describe_prompt", "") or "").strip()
+        # 剥掉标题行里的章节编号：编号在向量检索里是噪声，
+        # 但它同时是「搜 2.7.1」这类精确查询的锚点 —— 显式开关，由用户定。
+        strip_numbers = _as_bool(tool_parameters.get("strip_heading_numbers", True), True)
+        # 把「图片 + 描述」单独切成一个子块：图片签名 URL 有 150+ 字符
+        # 且大半是随机串，混在正文里会稀释整个子块的语义。
+        isolate_images = _as_bool(tool_parameters.get("isolate_image_blocks", True), True)
 
         if files and input_text:
             # 两者都给了：以文件为准（文本模式的定位是 MinerU 分支专用）
@@ -354,6 +364,18 @@ class MarkitdownTool(Tool):
                         )
             blocks.append(text)
 
+        # ---- 检索友好化后处理（files 与 text 两条入口共用）----
+        # 必须放在所有标题重建之后 —— 这两步都会改动标题层级的判定依据。
+        processed: list[str] = []
+        for t in blocks:
+            t, msgs = _postprocess_for_retrieval(
+                t, scheme, child_delimiter, strip_numbers, isolate_images
+            )
+            if msgs:
+                notices.append(f"[info] {name}: " + "; ".join(msgs))
+            processed.append(t)
+        blocks = processed
+
         output = "\n\n---\n\n".join(blocks)
 
         # 全部文件都失败 → 输出明确的失败原因，而不是空字符串。
@@ -418,6 +440,51 @@ class MarkitdownTool(Tool):
 
 
 # ------------------------------------------------------------------ 辅助函数
+
+
+def _postprocess_for_retrieval(
+    text: str,
+    scheme: LevelScheme,
+    child_delimiter: str,
+    strip_numbers: bool,
+    isolate_images: bool,
+) -> tuple[str, list[str]]:
+    """检索友好化后处理：剥标题编号 + 图片独立成块。
+
+    两步都必须放在**所有标题重建之后**：
+
+    * 剥编号 —— 层级判定依赖编号形态（形态序 / 点分体系），
+      先剥会让层级判定失去依据。
+    * 图片独立成块 —— 插入的标记本身是一个标题，
+      半路多出来的标记会被当成真标题参与判定，把层级搞乱。
+
+    顺序：先剥编号，再切图片。切图片时插入的标记行不含编号，
+    剥编号这步已经过去了，两者不冲突。
+
+    返回 (新文本, 说明信息列表)。
+    """
+    msgs: list[str] = []
+
+    if strip_numbers:
+        text, n_stripped = strip_heading_numbers(text)
+        if n_stripped:
+            msgs.append(f"stripped {n_stripped} heading number(s)")
+
+    if isolate_images:
+        # 标记级别必须跟着子分隔符走：子分隔符 `\n## ` → 二级标记，
+        # `\n### ` → 三级标记。写死会让用户换配置后失效。
+        child_level = parse_delimiter_level(child_delimiter)
+        if child_level is None:
+            # 子分隔符里没有 #（Dify 默认的 \n\n / \n）——
+            # 插标题标记切不出子块，退回方案约定的子级。
+            child_level = scheme.child_level
+        if child_level:
+            marker = "#" * child_level + " 图片"
+            text, n_blocks = isolate_image_blocks(text, marker)
+            if n_blocks:
+                msgs.append(f"isolated {n_blocks} image block(s)")
+
+    return text, msgs
 
 
 def _as_bool(value: Any, default: bool) -> bool:
