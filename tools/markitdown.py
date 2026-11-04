@@ -32,6 +32,7 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 from markitdown import MarkItDown
 
 from tools.docx_meta import parse_docx_meta
+from tools.docx_repair import repair_docx
 from tools.heading_levels import (
     CHILD,
     DEFAULT_CHILD_DELIMITER,
@@ -181,10 +182,33 @@ class MarkitdownTool(Tool):
                 )
                 raw = result.markdown or ""
             except Exception as exc:  # noqa: BLE001
-                msg = f"{type(exc).__name__}: {exc}"
-                notices.append(f"[fail] {name}: {msg}")
-                failures.append(f"{name} — {msg}")
-                continue
+                # docx 自愈：关系指向不存在的目标（典型是 Target="../NULL"）时，
+                # mammoth 会抛 KeyError，整篇文档一条内容都产不出来 ——
+                # 一张坏图拖垮全文。修掉坏引用后重试一次。
+                repaired = False
+                if hint == "zip" and _ext_of(name, hint) == ".docx":
+                    fixed_blob, n_fixed = repair_docx(blob)
+                    if n_fixed:
+                        try:
+                            result = md.convert_stream(
+                                io.BytesIO(fixed_blob),
+                                file_extension=".docx",
+                                keep_data_uris=(image_mode in {"url", "describe"}),
+                            )
+                            raw = result.markdown or ""
+                            repaired = True
+                            notices.append(
+                                f"[fix] {name}: removed {n_fixed} broken relationship(s) "
+                                f"pointing to missing targets, converted successfully"
+                            )
+                        except Exception:  # noqa: BLE001
+                            repaired = False
+
+                if not repaired:
+                    msg = f"{type(exc).__name__}: {exc}"
+                    notices.append(f"[fail] {name}: {msg}")
+                    failures.append(f"{name} — {msg}")
+                    continue
 
             # 图片处理：remove=删掉 base64 引用；url=上传换签名链接；
             # describe=上传后再逐张调视觉模型生成描述，插在 URL 前。
