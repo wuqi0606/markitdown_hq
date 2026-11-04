@@ -88,7 +88,7 @@ parameters:
       zh_Hans: 页眉页脚特征词
     human_description:
       en_US: 'Keywords identifying repeating headers/footers, e.g. your company name. Separate multiple keywords with commas. For upstream parser output, a keyword matches the whole line (an optional prefix such as "Prepared by:" is allowed), so it also removes leftovers the parser did not strip.'
-      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。走上游解析文本入口时，关键词匹配整行（允许「编制人：」这类前缀），因此也能清掉解析器没清干净的残留。
+      zh_Hans: 用于识别重复页眉/页脚的关键词，例如公司名称。多个词用逗号分隔。
     form: form
   - name: parent_delimiter
     type: string
@@ -99,7 +99,7 @@ parameters:
       zh_Hans: 父块分隔符
     human_description:
       en_US: 'Fill in the same parent delimiter you configure on the Dify parent-child chunking node (e.g. \n# ). The number of # in it decides the heading level the plugin emits for chapter-level headings, so they align with your chunk boundaries.'
-      zh_Hans: '填与 Dify 父子分段节点上相同的父分隔符，例如 \n# 。分隔符里 # 的个数决定插件为章节级标题输出的级别，好让标题与分块边界对齐。'
+      zh_Hans: '用于分块的分隔符'
     form: form
   - name: child_delimiter
     type: string
@@ -110,7 +110,7 @@ parameters:
       zh_Hans: 子块分隔符
     human_description:
       en_US: 'Fill in the same child delimiter you configure on the Dify parent-child chunking node (e.g. \n## ). The number of # in it decides the heading level the plugin emits for section-level headings.'
-      zh_Hans: '填与 Dify 父子分段节点上相同的子分隔符，例如 \n## 。分隔符里 # 的个数决定插件为节级标题输出的级别。'
+      zh_Hans: '用于子分块的分隔符'
     form: form
   - name: strip_heading_numbers
     type: boolean
